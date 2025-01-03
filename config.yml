@@ -1,0 +1,144 @@
+ANALYSIS_PARAMS:
+  OBSERVE_OR_RUN: 'observe'
+  OBSERVE_OR_RUN_TIME: 'observe'
+  DATA_MODE: 'stages'
+  N_STAGES: 4
+  N_WINDOWS: 3
+  SAMPLED_AREAS: [0, 5]
+  SAMPLED_AREAS_NAMES: ['dPFC', 'vPFC']
+  TIME_WINDOW: [140, 150]
+  TIME_WINDOW_EARLY: [90, 100]
+  N_REPS: 200
+  COLOUR_ID: 0
+  SHAPE_ID: 1
+  WIDTH_ID: 2
+  XOR_ID: 3
+  WHICH_TASK_SEL: 'task_1'
+  METRIC_SEL: 'euclidean distance'
+  NORMALISATION_SEL: 'zscore'
+  RND_MODEL_SEL: 'gaussian (spherical)'
+  N_BOOTSTRAP_SEL: 1000
+  DESIGN_ENCODING_SEL: '+1/-1'
+ENCODING_EXP1:
+  colour: [0, 0, 0, 0, 1, 1, 1, 1]
+  shape: [0, 0, 1, 1, 0, 0, 1, 1]
+  width: [0, 1, 0, 1, 0, 1, 0, 1]
+  xor: [1, 1, 0, 0, 0, 0, 1, 1]
+ENCODING_EXP2:
+  context: [0, 0, 0, 0, 1, 1, 1, 1, 0, 0, 0, 0, 1, 1, 1, 1 ]
+  taskset: [0, 0, 0, 0, 0, 0, 0, 0, 1, 1, 1, 1, 1, 1, 1, 1 ]
+  shape: [ 0, 0, 1, 1, 0, 0, 1, 1, 0, 0, 1, 1, 0, 0, 1, 1 ]
+  width: [ 0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 1  ]
+  xor: [ 1, 1, 0, 0, 0, 0, 1, 1, 1, 1, 0, 0, 0, 0, 1, 1 ]
+SEL_ENCODING_EXP1:
+  colour_sel: [-1, -1, -1, -1, 1, 1, 1, 1]
+  shape_sel: [-1, -1, 1, 1, -1, -1, 1, 1]
+  width_sel: [-1, 1, -1, 1, -1, 1, -1, 1]
+  xor_sel: [1, 1, -1, -1, -1, -1, 1, 1]
+  int_irrel_sel: [1, -1, 1, -1, -1, 1, -1, 1]
+SEL_ENCODING_EXP2:
+  context_sel: [-1, -1, -1, -1, 1, 1, 1, 1, -1, -1, -1, -1, 1, 1, 1, 1]
+  set_sel: [-1, -1, -1, -1, -1, -1, -1, -1, 1, 1, 1, 1, 1, 1, 1, 1]
+  shape_sel: [-1, 1, -1, 1, -1, 1, -1, 1, -1, 1, -1, 1, -1, 1, -1, 1]
+
+PATHS:
+  output_path: '/Volumes/MW_DRIVE/data/pre_processed/'
+  out_template_spks: '/Volumes/MW_DRIVE/data/pre_processed/{0}_Spikes_preprocessed.npy'
+  out_template_meta: '/Volumes/MW_DRIVE/data/pre_processed/{0}_meta.npy'
+  out_template_sel_exc: '/Volumes/MW_DRIVE/data/pre_processed/{0}_sel_exc.npy'
+  out_template_loc: '/Volumes/MW_DRIVE/data/pre_processed/{0}_cell_loc.csv'
+  out_template_sel_list: '/Volumes/MW_DRIVE/data/pre_processed/{0}_selectivity.csv'
+  out_template_figures: '/Volumes/MW_DRIVE/Passive_xor/figures/'
+  in_template_beh: '/Volumes/MW_DRIVE/data/mat/{0}Event_re.mat'
+SESSION_NAMES:
+  sessions_womble_1: [
+  'Wom20200910',
+  'Wom20200911',
+  'Wom20200914',
+  'Wom20200915',
+  'Wom20200916',
+  'Wom20200917',
+  'Wom20200918',
+  'Wom20200921',
+  'Wom20200922',
+  'Wom20200923',
+  'Wom20200924',
+  'Wom20200925',
+  'Wom20200928',
+  'Wom20200929',
+  'Wom20200930',
+  'Wom20201001',
+  'Wom20201002']
+  sessions_womble_2: [
+  'Wom20201005',
+  'Wom20201006',
+  'Wom20201007',
+  'Wom20201008',
+  'Wom20201009',
+  'Wom20201012',
+  'Wom20201013',
+  'Wom20201014']
+  sessions_wilfred_1: [
+  'Wil20201020',
+  'Wil20201021',
+  'Wil20201022',
+  'Wil20201023',
+  'Wil20201026',
+  'Wil20201027',
+  'Wil20201028',
+  'Wil20201029',
+  'Wil20201102',
+  'Wil20201103']
+  sessions_wilfred_2: [
+  'Wil20201104',
+  'Wil20201106',
+  'Wil20201109',
+  'Wil20201110',
+  'Wil20201111',
+  'Wil20201112',
+  'Wil20201113',
+  'Wil20201116',
+  'Wil20201117',
+  'Wil20201118',
+  'Wil20201119',
+  'Wil20201120',
+  'Wil20201123',
+  'Wil20201124',
+  'Wil20201125']
+TRIGGER_CODES:
+  NO_TRIGGER: 0
+  FP_GRAY_ON: 40
+  FP_RED_ON: 42
+  FP_ERR_ON: 46
+  FP_ERR_OFF: 47
+  EYEFIX_ON: 64
+  REWARD_ON: 66
+  REWARD_OFF: 67
+  CUE_OFF: 76
+  TARGET_OFF: 87
+  TRIAL START: 6116
+  TRIAL END: 5097
+  EXP_START: 12388
+  BREAK_CUE_ERROR: 88
+  BREAK_TARGET_ERROR: 89
+  BREAK_ERROR: 90
+  FIXATION_ERROR: 91
+  TYPE1_TRIAL: 4101
+  TYPE2_TRIAL: 4102
+  TYPE3_TRIAL: 4103
+  TYPE4_TRIAL: 4104
+  TYPE5_TRIAL: 4105
+  TYPE6_TRIAL: 4106
+  TYPE7_TRIAL: 4107
+  TYPE8_TRIAL: 4108
+  CUE1_ON: 68
+  CUE2_ON: 69
+  CUE3_ON: 70
+  CUE4_ON: 71
+  TARGET1_ON: 79
+  TARGET2_ON: 80
+  TARGET3_ON: 81
+  TARGET4_ON: 82
+
+
+
