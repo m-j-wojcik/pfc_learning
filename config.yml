@@ -42,14 +42,14 @@ SEL_ENCODING_EXP2:
   shape_sel: [-1, 1, -1, 1, -1, 1, -1, 1, -1, 1, -1, 1, -1, 1, -1, 1]
 
 PATHS:
-  output_path: '/Volumes/MW_DRIVE/data/pre_processed/'
-  out_template_spks: '/Volumes/MW_DRIVE/data/pre_processed/{0}_Spikes_preprocessed.npy'
-  out_template_meta: '/Volumes/MW_DRIVE/data/pre_processed/{0}_meta.npy'
-  out_template_sel_exc: '/Volumes/MW_DRIVE/data/pre_processed/{0}_sel_exc.npy'
-  out_template_loc: '/Volumes/MW_DRIVE/data/pre_processed/{0}_cell_loc.csv'
-  out_template_sel_list: '/Volumes/MW_DRIVE/data/pre_processed/{0}_selectivity.csv'
-  out_template_figures: '/Volumes/MW_DRIVE/Passive_xor/figures/'
-  in_template_beh: '/Volumes/MW_DRIVE/data/mat/{0}Event_re.mat'
+  output_path: './data/pre_processed/'
+  out_template_spks: './data/pre_processed/{0}_Spikes_preprocessed.npy'
+  out_template_meta: './data/pre_processed/{0}_meta.npy'
+  out_template_sel_exc: './data/pre_processed/{0}_sel_exc.npy'
+  out_template_loc: './data/pre_processed/{0}_cell_loc.csv'
+  out_template_sel_list: './data/pre_processed/{0}_selectivity.csv'
+  out_template_figures: './figures/'
+  in_template_beh: './data/mat/{0}Event_re.mat'
 SESSION_NAMES:
   sessions_womble_1: [
   'Wom20200910',
