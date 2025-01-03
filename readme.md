@@ -1,4 +1,4 @@
-# Neural Encoding Analysis Pipeline
+# Neural Decoding and Representation Analysis Pipeline
 
 Code for analyzing neural encoding during learning tasks, with a focus on decoding task variables and analyzing representational changes across learning stages.
 
