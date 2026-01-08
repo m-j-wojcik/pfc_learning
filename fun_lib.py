@@ -8,7 +8,6 @@ from tqdm import tqdm
 from itertools import groupby
 from sklearn.metrics import r2_score
 from sklearn import linear_model
-from sklearn.discriminant_analysis import LinearDiscriminantAnalysis as LDA
 import random
 import itertools
 from matplotlib import colors
@@ -22,16 +21,867 @@ from scipy.ndimage import label
 import pickle
 from matplotlib import patches
 from numpy.linalg import norm
-from sklearn.decomposition import PCA
 import matplotlib.gridspec as gridspec
 import matplotlib
 matplotlib.use('TkAgg')
 plt.rcParams['svg.fonttype'] = 'none'
 from itertools import chain
-from mne.decoding import cross_val_multiscore
 import scipy.io as io
 import yaml
 from scipy import signal
+from sklearn.base import BaseEstimator, ClassifierMixin
+from sklearn.utils.validation import check_X_y, check_array, check_is_fitted
+from sklearn.utils.multiclass import unique_labels
+from scipy.stats import zscore
+from joblib import Parallel, delayed
+from numba import jit, prange
+import multiprocessing as mp
+
+
+
+@jit(nopython=True, parallel=True)
+def fast_pearsonr_matrix(X, Y):
+    """
+    Fast computation of Pearson correlation matrix using Numba.
+    X: (n_features, n_timepoints1)
+    Y: (n_features, n_timepoints2)
+    Returns: (n_timepoints1, n_timepoints2)
+    """
+    n_features, n_timepoints1 = X.shape
+    _, n_timepoints2 = Y.shape
+
+    corr_matrix = np.zeros((n_timepoints1, n_timepoints2))
+
+    for i in prange(n_timepoints1):
+        for j in prange(n_timepoints2):
+            x = X[:, i]
+            y = Y[:, j]
+
+            # Compute correlation manually for speed
+            x_mean = np.mean(x)
+            y_mean = np.mean(y)
+
+            num = np.sum((x - x_mean) * (y - y_mean))
+            den_x = np.sqrt(np.sum((x - x_mean) ** 2))
+            den_y = np.sqrt(np.sum((y - y_mean) ** 2))
+
+            if den_x == 0 or den_y == 0:
+                corr_matrix[i, j] = 0
+            else:
+                corr_matrix[i, j] = num / (den_x * den_y)
+
+    return corr_matrix
+
+
+@jit(nopython=True, parallel=True)
+def fast_pearsonr_vector(X, Y):
+    """
+    Fast computation of Pearson correlation vector using Numba.
+    X: (n_features, n_timepoints)
+    Y: (n_features, n_timepoints)
+    Returns: (n_timepoints,)
+    """
+    n_features, n_timepoints = X.shape
+    corr_vector = np.zeros(n_timepoints)
+
+    for t in prange(n_timepoints):
+        x = X[:, t]
+        y = Y[:, t]
+
+        x_mean = np.mean(x)
+        y_mean = np.mean(y)
+
+        num = np.sum((x - x_mean) * (y - y_mean))
+        den_x = np.sqrt(np.sum((x - x_mean) ** 2))
+        den_y = np.sqrt(np.sum((y - y_mean) ** 2))
+
+        if den_x == 0 or den_y == 0:
+            corr_vector[t] = 0
+        else:
+            corr_vector[t] = num / (den_x * den_y)
+
+    return corr_vector
+
+def temp_dec_stages_permutation(data_eq, labels_eq, variable_mapping, tranc_window=[40, 160], n_permutations=100,
+                                random_state=42, method="Pearson"):
+    """
+    Compute temporal generalization matrices with original and scrambled labels.
+    Uses the same permuted labels across all windows for each permutation.
+
+    Parameters:
+    -----------
+    data_eq : list of ndarrays
+        List of data arrays for each stage
+    labels_eq : list of ndarrays
+        List of label arrays for each stage
+    variable_mapping : list or array
+        Mapping of labels to factors
+    tranc_window : list
+        Time window to analyze [start, end]
+    n_permutations : int
+        Number of permutation iterations to perform
+    random_state : int
+        Random seed for reproducibility
+
+    Returns:
+    --------
+    decoding : ndarray
+        Original temporal generalization matrices
+    decoding_perm : ndarray
+        Permuted temporal generalization matrices
+    """
+    n_windows = data_eq[0].shape[0]
+    n_stages = len(data_eq)
+    window_size = tranc_window[1] - tranc_window[0] + 1
+    rng = np.random.RandomState(random_state)
+
+    # Initialize arrays for original and permuted decoding
+    decoding = np.zeros((n_stages, n_windows, window_size, window_size))
+    decoding_perm = np.zeros((n_permutations, n_stages, n_windows, window_size, window_size))
+
+    # Convert mapping to numpy array if it's not already
+    colour_fac = np.array(variable_mapping)
+
+    # Compute original decoding matrices first
+    for i_stage in range(n_stages):
+        y_stage = labels_eq[i_stage][0, :]
+        for i_window in range(n_windows):
+
+            # Extract data for this stage and window
+            X_stage = data_eq[i_stage][i_window, :, :, tranc_window[0]:tranc_window[1] + 1]
+
+
+            # Compute original labels
+            y_colour = np.array(assign_lables(y_stage, colour_fac))
+
+            if method == "SVM":
+                decoding[i_stage, i_window, :, :] = decode_time(X_stage, y_colour, n_inter=1)
+            elif method == "Pearson":
+                decoder = NeuralCorrelationDecoder(across_time=True)
+                decoder.fit(X_stage, y_colour)
+                decoding[i_stage, i_window, :, :] = decoder.get_correlation()
+
+    print(f'Constructing null')
+    # Now compute permuted decoding matrices
+    for perm in tqdm(range(n_permutations)):
+        # For each stage, generate ONE permutation to use across all windows
+        for i_stage in range(n_stages):
+            # Get the first window's labels to determine permutation structure
+            y_stage_first = labels_eq[i_stage][0, :]
+            y_colour_first = np.array(assign_lables(y_stage_first, colour_fac))
+
+            # Create a single permutation for this stage
+            y_perm_indices = rng.permutation(len(y_colour_first))
+
+            # Use this permutation for all windows in this stage
+            for i_window in range(n_windows):
+                # Extract data for this stage and window
+                X_stage = data_eq[i_stage][i_window, :, :, tranc_window[0]:tranc_window[1] + 1]
+                y_stage = labels_eq[i_stage][i_window, :]
+
+                # Get original color labels
+                y_colour = np.array(assign_lables(y_stage, colour_fac))
+
+                # Apply the same permutation pattern to these labels
+                y_perm = y_colour[y_perm_indices]
+
+                # Compute decoding matrix with permuted labels
+
+
+                if method == "SVM":
+                    decoding_perm[perm, i_stage, i_window, :, :] = decode_time(X_stage, y_perm, n_inter=1)
+                elif method == "Pearson":
+                    decoder = NeuralCorrelationDecoder(across_time=True)
+                    decoder.fit(X_stage, y_perm)
+                    decoding_perm[perm, i_stage, i_window, :, :] = decoder.get_correlation()
+
+
+    return decoding, decoding_perm
+
+
+
+
+
+def _single_iteration(X, y, iteration_seed, across_time):
+    """
+    Single iteration of cross-validation for parallelization.
+
+    Parameters
+    ----------
+    X : ndarray
+        Input data
+    y : ndarray
+        Labels
+    iteration_seed : int
+        Random seed for this iteration
+    across_time : bool
+        Whether to compute across-time correlations
+
+    Returns
+    -------
+    correlation_result : ndarray
+        Correlation matrix or vector for this iteration
+    """
+
+    def condi_avg(data, labels):
+        """Optimized for binary classification."""
+        mask = labels.astype(bool)
+        condition_0 = data[~mask].mean(axis=0)
+        condition_1 = data[mask].mean(axis=0)
+        return np.array([condition_0, condition_1])
+
+
+    # Set seed for this iteration (convert numpy int to Python int)
+    seed_value = int(iteration_seed)  # Convert to native Python int
+    np.random.seed(seed_value)
+    random.seed(seed_value)
+
+    n_trials = X.shape[0]
+
+    # Create random split
+    idx_rnd = np.concatenate([np.zeros(n_trials // 2), np.ones(n_trials // 2)])
+    if (n_trials % 2) > 0:
+        idx_rnd = np.concatenate([idx_rnd, [1.0]])
+    np.random.shuffle(idx_rnd)
+
+    # Split data
+    X1 = X[idx_rnd < 1, :, :]
+    y1 = y[idx_rnd < 1]
+    X2 = X[idx_rnd > 0, :, :]
+    y2 = y[idx_rnd > 0]
+
+    # Z-score
+    X1 = zscore(X1, axis=1)
+    X2 = zscore(X2, axis=1)
+
+    # Compute condition averages
+    condition_averages1 = condi_avg(X1, y1)
+    condition_averages2 = condi_avg(X2, y2)
+
+    # Compute differences between conditions
+    diffTrain = condition_averages1[0, :, :] - condition_averages1[1, :, :]
+    diffTest = condition_averages2[0, :, :] - condition_averages2[1, :, :]
+
+    # Compute correlations using fast functions
+    if across_time:
+        # Temporal generalization: correlate across all time point pairs
+        corr1 = fast_pearsonr_matrix(diffTrain, diffTest)
+        corr2 = fast_pearsonr_matrix(diffTest, diffTrain)
+        return np.tanh(np.mean(np.arctanh(np.array([corr1, corr2])), axis=0))
+    else:
+        # Within-time correlations only
+        return fast_pearsonr_vector(diffTrain, diffTest)
+
+
+class NeuralCorrelationDecoder(BaseEstimator, ClassifierMixin):
+    """
+    Optimized neural correlation decoder with parallel processing and JIT compilation.
+
+    Parameters
+    ----------
+    n_iterations : int, default=10
+        Number of cross-validation iterations to perform
+    across_time : bool, default=True
+        If True, compute correlations across all time point pairs (temporal generalization)
+        If False, compute correlations only within the same time points
+    random_state : int, RandomState instance or None, default=None
+        Controls the randomness of the cross-validation splits
+    n_jobs : int, default=-1
+        Number of parallel jobs. -1 means use all available cores
+    batch_size : int, default=None
+        Batch size for parallel processing. If None, uses n_iterations // n_cores
+    """
+
+    def __init__(self, n_iterations=10, across_time=True, random_state=None,
+                 n_jobs=-1, batch_size=None):
+        self.n_iterations = n_iterations
+        self.across_time = across_time
+        self.random_state = random_state
+        self.n_jobs = n_jobs
+        self.batch_size = batch_size
+
+    def _validate_input(self, X, y=None):
+        """Validate input data format."""
+        if X.ndim != 3:
+            raise ValueError(f"Expected 3D array (n_trials, n_features, n_timepoints), "
+                             f"got {X.ndim}D array")
+
+        if y is not None:
+            if len(np.unique(y)) != 2:
+                raise ValueError("This decoder only supports binary classification "
+                                 f"(2 classes), got {len(np.unique(y))} classes")
+
+        return X, y
+
+    def fit(self, X, y):
+        """
+        Fit the neural correlation decoder using parallel processing.
+
+        Parameters
+        ----------
+        X : array-like of shape (n_trials, n_features, n_timepoints)
+            Training data
+        y : array-like of shape (n_trials,)
+            Target values (binary classification)
+
+        Returns
+        -------
+        self : object
+            Returns the instance itself
+        """
+        # Validate inputs
+        X, y = check_X_y(X, y, allow_nd=True)
+        X, y = self._validate_input(X, y)
+
+        # Store classes
+        self.classes_ = unique_labels(y)
+
+        # Generate seeds for each iteration to ensure reproducibility
+        if self.random_state is not None:
+            np.random.seed(self.random_state)
+            seeds = np.random.randint(0, 2 ** 31, self.n_iterations)
+        else:
+            seeds = np.random.randint(0, 2 ** 31, self.n_iterations)
+
+        # Determine number of jobs
+        n_jobs = self.n_jobs
+        if n_jobs == -1:
+            n_jobs = mp.cpu_count()
+        elif n_jobs <= 0:
+            n_jobs = max(1, mp.cpu_count() + n_jobs)
+
+        # Parallel computation of iterations
+        # Handle batch_size properly for joblib
+        parallel_kwargs = {'n_jobs': n_jobs}
+        if self.batch_size is not None:
+            parallel_kwargs['batch_size'] = self.batch_size
+
+        results = Parallel(**parallel_kwargs)(
+            delayed(_single_iteration)(X, y, seed, self.across_time)
+            for seed in seeds
+        )
+
+        # Convert results to numpy array and average using Fisher z-transform
+        corrs_iters = np.array(results)
+
+        # Handle potential NaN/inf values before arctanh
+        corrs_iters = np.clip(corrs_iters, -0.99999, 0.99999)
+
+        self.correlation_matrix_ = np.tanh(np.mean(np.arctanh(corrs_iters), axis=0))
+        self.is_fitted_ = True
+
+        return self
+
+    def get_correlation(self):
+        """Get the fitted correlation matrix."""
+        check_is_fitted(self, 'is_fitted_')
+        return self.correlation_matrix_
+
+    def set_params(self, **params):
+        """Set the parameters of this estimator."""
+        for key, value in params.items():
+            if hasattr(self, key):
+                setattr(self, key, value)
+            else:
+                raise ValueError(f"Invalid parameter {key}")
+        return self
+
+    def get_params(self, deep=True):
+        """Get parameters for this estimator."""
+        return {
+            'n_iterations': self.n_iterations,
+            'across_time': self.across_time,
+            'random_state': self.random_state,
+            'n_jobs': self.n_jobs,
+            'batch_size': self.batch_size
+        }
+
+def decode_time(X, y, n_inter=1, return_inter=False):
+    y = np.array(y)
+
+    scores_all = []
+    for n in range(n_inter):
+
+        clf = make_pipeline(
+            StandardScaler(),
+            SVM(C=5e-4))
+
+        time_gen = GeneralizingEstimator(clf, scoring="roc_auc", n_jobs=-1, verbose=True)
+
+        n_trls = X.shape[0]
+        idx_rnd = np.concatenate([np.zeros(n_trls // 2), np.ones(n_trls // 2)])
+        if (n_trls % 2) > 0:
+            idx_rnd = np.concatenate([idx_rnd, [1.0]])
+        random.shuffle(idx_rnd)
+
+
+        X1 = X[idx_rnd < 1, :, :]
+        y1 = y[idx_rnd < 1]
+        X2 = X[idx_rnd > 0, :, :]
+        y2 = y[idx_rnd > 0]
+
+        time_gen.fit(X1, y1)
+        score1 = time_gen.score(X2, y2)
+
+        time_gen.fit(X2, y2)
+        score2 = time_gen.score(X1, y1)
+        scores_all.append(np.array([score1, score2]).mean(0))
+
+    if return_inter:
+        return scores_all
+    else:
+        return np.mean(np.array(scores_all), axis=0)
+
+
+def dy_mask(obs, rnd, clusteralpha=0.05):
+    '''
+       looks for significant off diagonal reduction
+
+       Params:
+       obs: 2d observations
+       rnd: 3d randomizations (randomizations are in trailing dimension)
+
+       Outputs:
+       dynaMask: 1d dynamism index (time-resolved)
+
+   '''
+
+    # Computing the mask
+
+    # get the diagonal twice, reshape to allow easy comparison with full matrix
+    dynaObsA = np.diag(obs)[:, np.newaxis] - obs
+    dynaObsB = np.diag(obs)[np.newaxis, :] - obs
+
+    # do the same for the randomizations
+    dynaRndA = np.diagonal(rnd)[:, :, np.newaxis] - rnd.T
+    dynaRndB = np.diagonal(rnd)[:, np.newaxis, :] - rnd.T
+    dynaRndA = dynaRndA.T
+    dynaRndB = dynaRndB.T
+
+    pDynaA, labDynaA = permutation_test(obsdat=dynaObsA, rnddat=dynaRndA, tail=1,  clusteralpha=clusteralpha)
+    pDynaB, labDynaB = permutation_test(dynaObsB, dynaRndB, tail=1, clusteralpha=clusteralpha)
+
+    dynaMask = (pDynaA < 0.05) & (pDynaB < 0.05)
+
+    di = (np.mean(dynaMask, axis=0) + np.mean(dynaMask, axis=1)) / 2
+
+    return di, dynaMask
+
+
+def plot_time_generalisation(gs, fig, dec, rnd=None, times_sec=None, vmin=-1, vmax=1.0,
+                             matrix_limits=None, tick_positions=None,
+                             reference_lines=None, cmap="RdBu_r", title= "Coding stability", stat_test ='off-diagonal', clusteralpha=0.05, tail=0):
+    """
+    Plot time generalisation matrix with both dynamism and stability indices
+
+    This function creates a comprehensive visualisation of temporal generalisation
+    within a specified grid position.
+
+    Parameters:
+    -----------
+    gs : matplotlib GridSpec slice
+        GridSpec slice (e.g., gs[0,0] for single cell or gs[0,0:2] for spanning cells)
+    fig : matplotlib Figure
+        The figure object to add the subplot to
+    dec : ndarray
+        The decoding matrix to display (observation)
+    rnd : ndarray, optional
+        Randomization matrix with shape (time, time, n_randomizations)
+    times_sec : ndarray, optional
+        Time points in seconds. If None, creates a default range
+    vmin, vmax : float
+        Min and max values for color mapping
+    matrix_limits : tuple, optional
+        (min_idx, max_idx) limits for both x and y axes
+    tick_positions : list or ndarray, optional
+        Indices where to place ticks
+    reference_lines : list, optional
+        Time points where to place reference lines
+    cmap : str
+        Colormap to use
+    """
+    import numpy as np
+    import matplotlib.pyplot as plt
+    from scipy.ndimage import label
+
+    # Get current figure (use the provided fig parameter)
+    # fig is already provided as parameter
+
+    # Create default time range if not provided
+    if times_sec is None:
+        times_sec = np.linspace(-0.1, 1.1, dec.shape[-1])
+
+    # Create default tick positions if not provided
+    if tick_positions is None:
+        tick_positions = np.array([10, 60, 110])
+
+    # Create default reference lines if not provided
+    if reference_lines is None:
+        reference_lines = [0, 0.5, 1.0]
+
+    # Create subplot using the provided GridSpec
+    ax = fig.add_subplot(gs)
+
+    # Plot the main time generalization matrix
+    im = ax.matshow(
+        dec,
+        vmin=vmin,
+        vmax=vmax,
+        cmap=cmap,
+        origin="lower",
+    )
+
+    # Compute dynamism and stability if randomization data is provided
+    if rnd is not None:
+
+        if stat_test == 'off-diagonal':
+            # Get dynamism index and significance mask
+            _, sig_mask = dy_mask(dec, rnd, clusteralpha=clusteralpha)
+        elif stat_test == 'on-diagonal':
+            p_vals, cluster_labels = permutation_test(
+                obsdat=dec,
+                rnddat=rnd,
+                clustercorrect=True,
+                clusteralpha=clusteralpha,
+                tail = tail,
+            )
+            # Create mask for significant areas (p <= 0.05)
+            sig_mask = p_vals <= 0.05
+
+        # Plot significance masks on the main plot
+        if np.any(sig_mask):
+            # Use contour to outline significant dynamism areas
+            ax.contour(sig_mask, levels=[0.5], colors='black',
+                       linestyles='-', linewidths=0.8)
+
+    # Set tick labels
+    tick_labels = [f"{times_sec[i]:.1f}" for i in tick_positions]
+
+    # Set the ticks and labels
+    ax.set_xticks(tick_positions)
+    ax.set_xticklabels(tick_labels)
+    ax.set_yticks(tick_positions)
+    ax.set_yticklabels(tick_labels)
+
+    # Set matrix display limits if provided
+    if matrix_limits is not None:
+        min_idx, max_idx = matrix_limits
+        ax.set_xlim(min_idx, max_idx)
+        ax.set_ylim(min_idx, max_idx)
+
+    # Make sure ticks are at the bottom
+    ax.xaxis.set_ticks_position("bottom")
+
+    # Add reference lines to main plot
+    for time_val in reference_lines:
+        time_idx = np.argmin(np.abs(times_sec - time_val))
+        ax.axhline(time_idx, color="k", linestyle="--", linewidth=0.8)
+        ax.axvline(time_idx, color="k", linestyle="--", linewidth=0.8)
+
+    # Add axis labels
+    ax.set_xlabel('time (s)')
+    ax.set_ylabel('time (s)')
+
+    # Add title
+    ax.set_title(title)
+
+    # Add colorbar
+    cbar = fig.colorbar(im, ax=ax)
+    cbar.set_label("Pearson r")
+
+
+def plot_magnitude(gs, fig, mag_obs, mag_null_within, mag_null_ler,
+                   title, y_lim=[-1,1], alpha=0.05):
+    """
+    Plot cross-generalization magnitude across learning stages as bars.
+
+    Parameters
+    ----------
+    mag_obs : array, shape (n_stages,)
+        Observed magnitude values
+    mag_null_within : array, shape (n_permutations, n_stages)
+        Null distribution where only cross-gen is shuffled
+    mag_null_ler : array, shape (n_permutations, n_stages)
+        Full permutation null (both within and cross-gen shuffled)
+    """
+    x_data = np.arange(len(mag_obs)) + 1
+    ax = fig.add_subplot(gs)
+
+    # Bar plot
+    ax.bar(x_data, mag_obs, color='black', width=0.6, zorder=5)
+
+    ax.set_xticks(x_data)
+    ax.set_xticklabels(x_data)
+    sns.despine(right=True, top=True)
+    ax.set_ylabel('% of ceiling')
+    ax.set_xlabel('learning stage')
+    ax.set_title(title)
+
+    # --- Null band from mag_null_within ---
+    null_flat = mag_null_within.flatten()
+    null_mean = null_flat.mean()
+
+    # Center around mean
+    null_centered = null_flat - null_mean
+    crit = np.quantile(np.abs(null_centered), 1 - alpha)
+
+    lower = null_mean - crit
+    upper = null_mean + crit
+
+    # Mean line
+    ax.axhline(null_mean, linestyle='--', linewidth=1,
+               color='black', zorder=-6, alpha=0.7)
+    ax.axhline(1, linestyle='--', linewidth=1,
+               color='black', zorder=-6, alpha=0.7)
+
+    # Null band
+    rect = patches.Rectangle(
+        (x_data[0] - 0.5, lower),
+        len(x_data),
+        upper - lower,
+        edgecolor=None,
+        facecolor='lightgrey',
+        zorder=-7,
+    )
+    ax.add_patch(rect)
+
+    # --- Horizontal bracket: Learning effect (Stage 1 vs Stage 4) ---
+    # Bracket displayed from BELOW with arms pointing UP
+    y_range = y_lim[1] - y_lim[0]
+    bracket_base = y_lim[0] + 0.2 * y_range  # Changed from y_lim[1] - 0.11
+    bracket_height = bracket_base - 0.06 * y_range  # Changed sign to go down
+    bracket_center = (x_data[0] + x_data[-1]) / 2
+    gap_size = 1.2
+
+    print('Learning effect (magnitude increase):')
+    p_value_learning = compute_p_value(mag_obs[-1], mag_obs[0],
+                                       mag_null_ler[:, -1], mag_null_ler[:, 0],
+                                       tail='greater')
+
+    # Draw bracket - arms now point UP from below
+    ax.plot([x_data[0], x_data[0]], [bracket_height, bracket_base],
+            color='black', linewidth=1)
+    ax.plot([x_data[-1], x_data[-1]], [bracket_height, bracket_base],
+            color='black', linewidth=1)
+    ax.plot([x_data[0], bracket_center - gap_size / 2],
+            [bracket_height, bracket_height], color='black', linewidth=1)
+    ax.plot([bracket_center + gap_size / 2, x_data[-1]],
+            [bracket_height, bracket_height], color='black', linewidth=1)
+
+    ax.text(bracket_center, bracket_height * 1.2, p_into_stars(p_value_learning),
+            fontsize=10, color='black', ha='center', va='bottom')  # Changed va to 'bottom'
+
+    ax.set_ylim(y_lim)
+
+    return ax
+
+def plot_significance_stars(ax, scores_real, scores_null, time_window, ylim, tail='two', y_position=None, dec_type=0):
+    """
+    Compute p-value and plot significance stars on a time-resolved decoding plot.
+
+    Parameters:
+    -----------
+    ax : matplotlib axis object
+        The axis to plot on
+    scores_real : array
+        Real decoding scores of shape [decoding_type, time_points]
+    scores_null : array
+        Null distribution scores of shape [n_reps, decoding_type, time_points]
+    time_window : tuple or list
+        (start, end) in milliseconds for the time window
+    ylim : tuple or list
+        (ymin, ymax) of the plot
+    tail : str
+        'two', 'greater', or 'less' for the statistical test
+    y_position : float, optional
+        Y-position for stars. If None, uses 90% of ylim range
+    """
+    # Compute p-value comparing first and last timepoint
+    p_val = compute_p_value(scores_real[dec_type, 0], scores_real[dec_type, -1],
+                            scores_null[:, dec_type, 0], scores_null[:, dec_type, -1],
+                            tail=tail)
+
+    # Convert p-value to stars
+    if p_val <= 0.001:
+        stars = '***'
+        font_size = 15
+        scaler_position = 0.8
+    elif p_val <= 0.01:
+        stars = '**'
+        font_size = 15
+        scaler_position = 0.8
+    elif p_val <= 0.05:
+        stars = '*'
+        font_size = 15
+        scaler_position = 0.8
+    elif p_val <= 0.1:
+        stars = '†'
+        font_size = 10
+        scaler_position = 0.8
+    else:
+        stars = 'ns'
+        font_size = 10
+        scaler_position = 0.9
+
+    # Calculate center of time window in seconds
+    tw_center = (((time_window[0] + time_window[1]) / 2) / 100) - 0.5
+
+    # Calculate y-position (default to 90% of y-range for better spacing)
+    if y_position is None:
+        y_position = ylim[0] + scaler_position * (ylim[1] - ylim[0])
+
+    # Plot stars
+    ax.text(tw_center, y_position, stars,
+            ha='center', va='center',
+            fontsize=font_size,
+            color='black')
+
+    return ax
+
+def KLdivergence(x, y):
+    """Compute the Kullback-Leibler divergence between two multivariate samples.
+    Parameters
+    ----------
+    x : 2D array (n,d)
+    Samples from distribution P, which typically represents the true
+    distribution.
+    y : 2D array (m,d)
+    Samples from distribution Q, which typically represents the approximate
+    distribution.
+    Returns
+    -------
+    out : float
+    The estimated Kullback-Leibler divergence D(P||Q).
+    References
+    ----------
+    Pérez-Cruz, F. Kullback-Leibler divergence estimation of
+    continuous distributions IEEE International Symposium on Information
+    Theory, 2008.
+    """
+    from scipy.spatial import cKDTree as KDTree
+
+    # Check the dimensions are consistent
+    x = np.atleast_2d(x)
+    y = np.atleast_2d(y)
+    n, d = x.shape
+    m, dy = y.shape
+    assert (d == dy)
+
+    # Build a KD tree representation of the samples and find the nearest neighbour
+    # of each point in x.
+    xtree = KDTree(x)
+    ytree = KDTree(y)
+
+    # Get the first two nearest neighbours for x, since the closest one is the
+    # sample itself.
+    r = xtree.query(x, k=2, eps=.01, p=2)[0][:, 1]
+    s = ytree.query(x, k=1, eps=.01, p=2)[0]
+
+    return -np.log(r / s).sum() * d / n + np.log(m / (n - 1.))
+
+def permutation_test(obsdat, rnddat, clustercorrect=True, clusteralpha=0.05, tail=1):
+    """
+    Performs an (optionally cluster-corrected) permutation test of the observed
+    data, given the pre-computed randomizations. rnddat must have one extra
+    trailing dimension compared to obsdat.
+    """
+    if tail == 0:
+        alpha_2tail = clusteralpha / 2
+
+        clusterThreshold_right = np.percentile(rnddat, 100 * (1 - alpha_2tail), axis=obsdat.ndim)
+        clusterThreshold_left = np.percentile(rnddat, 100 * alpha_2tail, axis=obsdat.ndim)
+
+    elif tail == -1:
+        clusterThreshold = np.percentile(rnddat, 100 * clusteralpha, axis=obsdat.ndim)
+
+    elif tail == 1:
+        clusterThreshold = np.percentile(rnddat, 100 * (1 - clusteralpha), axis=obsdat.ndim)
+
+    p = np.ones_like(obsdat, dtype='float64')
+
+    # uncorrected 'test'
+    if not clustercorrect:
+        for inds, value in np.ndenumerate(obsdat):
+            rnd = np.sort(rnddat[inds])
+            if tail == 0:
+                pval = 2 * min(
+                    np.searchsorted(rnd, value, side='left'),
+                    rnd.shape[0] - np.searchsorted(rnd, value, side='right')
+                ) / rnd.shape[0]
+            elif tail == -1:
+                pval = np.searchsorted(rnd, value, side='right') / rnd.shape[0]
+            elif tail == 1:
+                pval = 1 - np.searchsorted(rnd, value, side='left') / rnd.shape[0]
+            p[inds] = pval
+        return p
+
+    # subfunction to compute clusterstats in one dataset (observed/randomized)
+    def compute_clusterstats(dat, getinds=True):
+
+        if tail == 0:
+            clusterCandidates_right = dat > clusterThreshold_right
+            clusterCandidates_left = dat < clusterThreshold_left
+            clusterCandidates = np.logical_or(clusterCandidates_right, clusterCandidates_left)
+
+        elif tail == -1:
+            clusterCandidates = dat < clusterThreshold
+        elif tail == 1:
+            clusterCandidates = dat > clusterThreshold
+
+        # label connected tiles
+        labelled, numfeat = label(clusterCandidates, output='uint32')
+
+        # compute aggregate cluster statistic for each cluster
+        # this is a quick way to use cluster size as the clusterstat.
+        # for other clusterstats (e.g. summed stat) a few more lines are needed
+        clusterNums, clusterStats = np.unique(labelled.ravel(), return_counts=True)
+
+        # remove 0, which corresponds to a non-cluster
+        if clusterNums[0] == 0:
+            # note that the check is necessary because it can happen that the
+            # entire observe data matrix exceeds the threshold, in that case we
+            # don't want to remove the first element (which will be 1 instead
+            # of zero)
+            clusterNums = clusterNums[1:]
+            clusterStats = clusterStats[1:]
+
+        # use cluster sum instead of size
+        clusterStats = [np.sum(dat[labelled == x]) for x in clusterNums]
+
+        if getinds:
+            return clusterStats, clusterNums, labelled
+        else:
+            return clusterStats
+
+    # get observed clusters and maximum randomized clusterstats
+    clusObs, clusNums, labelled = compute_clusterstats(obsdat)
+    clusRnd = [compute_clusterstats(rnddat[..., x], False)
+               for x in range(rnddat.shape[-1])]
+
+    # treat randomizations with 0 cluster candidates as if their max was 0
+    mymax = lambda x: 0 if len(x) == 0 else np.max(x)
+    mymin = lambda x: 0 if len(x) == 0 else np.min(x)
+
+    if tail == 0:
+        clusRnd = [mymax(np.abs(x)) for x in clusRnd]
+        clusObs = [np.abs(s) for s in clusObs]
+    elif tail == -1:
+        clusRnd = [mymin(x) for x in clusRnd]
+    elif tail == 1:
+        clusRnd = [mymax(x) for x in clusRnd]
+
+    clusRnd.sort()
+
+    for stat, num in zip(clusObs, clusNums):
+        if tail == 0:
+            pval = 1 - np.searchsorted(clusRnd, stat, side='left') / rnddat.shape[-1]
+        elif tail == -1:
+            pval = np.searchsorted(clusRnd, stat, side='right') / rnddat.shape[-1]
+        elif tail == 1:
+            pval = 1 - np.searchsorted(clusRnd, stat, side='left') / rnddat.shape[-1]
+        p[labelled == num] = pval
+
+    return p, labelled
 
 
 def assign_lables(labels, factor):
@@ -187,47 +1037,6 @@ def condi_avg(data, labels):
 
     return np.array(condition_averages)
 
-
-def KLdivergence(x, y):
-    """Compute the Kullback-Leibler divergence between two multivariate samples.
-    Parameters
-    ----------
-    x : 2D array (n,d)
-    Samples from distribution P, which typically represents the true
-    distribution.
-    y : 2D array (m,d)
-    Samples from distribution Q, which typically represents the approximate
-    distribution.
-    Returns
-    -------
-    out : float
-    The estimated Kullback-Leibler divergence D(P||Q).
-    References
-    ----------
-    Pérez-Cruz, F. Kullback-Leibler divergence estimation of
-    continuous distributions IEEE International Symposium on Information
-    Theory, 2008.
-    """
-    from scipy.spatial import cKDTree as KDTree
-
-    # Check the dimensions are consistent
-    x = np.atleast_2d(x)
-    y = np.atleast_2d(y)
-    n, d = x.shape
-    m, dy = y.shape
-    assert (d == dy)
-
-    # Build a KD tree representation of the samples and find the nearest neighbour
-    # of each point in x.
-    xtree = KDTree(x)
-    ytree = KDTree(y)
-
-    # Get the first two nearest neighbours for x, since the closest one is the
-    # sample itself.
-    r = xtree.query(x, k=2, eps=.01, p=2)[0][:, 1]
-    s = ytree.query(x, k=1, eps=.01, p=2)[0]
-
-    return -np.log(r / s).sum() * d / n + np.log(m / (n - 1.))
 
 
 def plot_covs(data, model_names, if_diff=False):
@@ -2345,111 +3154,6 @@ def smooth(x, window_len=5, window='hanning'):
 
     y = np.convolve(w / w.sum(), s, mode='valid')
     return y[int(window_len / 2):-int((window_len / 2))]
-
-
-def permutation_test(obsdat, rnddat, clustercorrect=True, clusteralpha=0.05, tail=1):
-    """
-    Performs an (optionally cluster-corrected) permutation test of the observed
-    data, given the pre-computed randomizations. rnddat must have one extra
-    trailing dimension compared to obsdat.
-    """
-    if tail == 0:
-        alpha_2tail = clusteralpha / 2
-
-        clusterThreshold_right = np.percentile(rnddat, 100 * (1 - alpha_2tail), axis=obsdat.ndim)
-        clusterThreshold_left = np.percentile(rnddat, 100 * alpha_2tail, axis=obsdat.ndim)
-
-    elif tail == -1:
-        clusterThreshold = np.percentile(rnddat, 100 * clusteralpha, axis=obsdat.ndim)
-
-    elif tail == 1:
-        clusterThreshold = np.percentile(rnddat, 100 * (1 - clusteralpha), axis=obsdat.ndim)
-
-    p = np.ones_like(obsdat, dtype='float64')
-
-    # uncorrected 'test'
-    if not clustercorrect:
-        for inds, value in np.ndenumerate(obsdat):
-            rnd = np.sort(rnddat[inds])
-            if tail == 0:
-                pval = 2 * min(
-                    np.searchsorted(rnd, value, side='left'),
-                    rnd.shape[0] - np.searchsorted(rnd, value, side='right')
-                ) / rnd.shape[0]
-            elif tail == -1:
-                pval = np.searchsorted(rnd, value, side='right') / rnd.shape[0]
-            elif tail == 1:
-                pval = 1 - np.searchsorted(rnd, value, side='left') / rnd.shape[0]
-            p[inds] = pval
-        return p
-
-    # subfunction to compute clusterstats in one dataset (observed/randomized)
-    def compute_clusterstats(dat, getinds=True):
-
-        if tail == 0:
-            clusterCandidates_right = dat > clusterThreshold_right
-            clusterCandidates_left = dat < clusterThreshold_left
-            clusterCandidates = np.logical_or(clusterCandidates_right, clusterCandidates_left)
-
-        elif tail == -1:
-            clusterCandidates = dat < clusterThreshold
-        elif tail == 1:
-            clusterCandidates = dat > clusterThreshold
-
-        # label connected tiles
-        labelled, numfeat = label(clusterCandidates, output='uint32')
-
-        # compute aggregate cluster statistic for each cluster
-        # this is a quick way to use cluster size as the clusterstat.
-        # for other clusterstats (e.g. summed stat) a few more lines are needed
-        clusterNums, clusterStats = np.unique(labelled.ravel(), return_counts=True)
-
-        # remove 0, which corresponds to a non-cluster
-        if clusterNums[0] == 0:
-            # note that the check is necessary because it can happen that the
-            # entire observe data matrix exceeds the threshold, in that case we
-            # don't want to remove the first element (which will be 1 instead
-            # of zero)
-            clusterNums = clusterNums[1:]
-            clusterStats = clusterStats[1:]
-
-        # use cluster sum instead of size
-        clusterStats = [np.sum(dat[labelled == x]) for x in clusterNums]
-
-        if getinds:
-            return clusterStats, clusterNums, labelled
-        else:
-            return clusterStats
-
-    # get observed clusters and maximum randomized clusterstats
-    clusObs, clusNums, labelled = compute_clusterstats(obsdat)
-    clusRnd = [compute_clusterstats(rnddat[..., x], False)
-               for x in range(rnddat.shape[-1])]
-
-    # treat randomizations with 0 cluster candidates as if their max was 0
-    mymax = lambda x: 0 if len(x) == 0 else np.max(x)
-    mymin = lambda x: 0 if len(x) == 0 else np.min(x)
-
-    if tail == 0:
-        clusRnd = [mymax(np.abs(x)) for x in clusRnd]
-        clusObs = [np.abs(s) for s in clusObs]
-    elif tail == -1:
-        clusRnd = [mymin(x) for x in clusRnd]
-    elif tail == 1:
-        clusRnd = [mymax(x) for x in clusRnd]
-
-    clusRnd.sort()
-
-    for stat, num in zip(clusObs, clusNums):
-        if tail == 0:
-            pval = 1 - np.searchsorted(clusRnd, stat, side='left') / rnddat.shape[-1]
-        elif tail == -1:
-            pval = np.searchsorted(clusRnd, stat, side='right') / rnddat.shape[-1]
-        elif tail == 1:
-            pval = 1 - np.searchsorted(clusRnd, stat, side='left') / rnddat.shape[-1]
-        p[labelled == num] = pval
-
-    return p, labelled
 
 
 def compute_perm_stats(obs_parts, rnd_parts, tails, if_smooth=False):
@@ -5626,6 +6330,7 @@ def plot_data_comparison(gs, fig, group1, group2, title=None, ylim=None, y_axis=
     ax.text(1.5, 3.5, p_into_stars(p_val), fontsize=12, ha='center')
     print('******* Trial termination facilitation effect *******')
     print('     Stats: M1 = ', str(round(np.mean(group1), 3)), ', M2 = ', str(round(np.mean(group2), 3)), ' | p-value = ', str(round(p_val, 3)))
+
 def run_decoding_width_locked_exp1(data_wins, labels_wins, time_window, factors):
     with open('config.yml') as file:
         config = yaml.full_load(file)
@@ -6149,566 +6854,6 @@ def get_switch_costs(sessions_stages):
 
     return stages_colour_switch, stages_shape_switch, stages_hier_swith
 
-
-
-def temp_dec_stages_permutation(data_eq, labels_eq, variable_mapping, tranc_window=[40, 160], n_permutations=100,
-                                random_state=42, method="Pearson"):
-    """
-    Compute temporal generalization matrices with original and scrambled labels.
-    Uses the same permuted labels across all windows for each permutation.
-
-    Parameters:
-    -----------
-    data_eq : list of ndarrays
-        List of data arrays for each stage
-    labels_eq : list of ndarrays
-        List of label arrays for each stage
-    variable_mapping : list or array
-        Mapping of labels to factors
-    tranc_window : list
-        Time window to analyze [start, end]
-    n_permutations : int
-        Number of permutation iterations to perform
-    random_state : int
-        Random seed for reproducibility
-
-    Returns:
-    --------
-    decoding : ndarray
-        Original temporal generalization matrices
-    decoding_perm : ndarray
-        Permuted temporal generalization matrices
-    """
-    n_windows = data_eq[0].shape[0]
-    n_stages = len(data_eq)
-    window_size = tranc_window[1] - tranc_window[0] + 1
-    rng = np.random.RandomState(random_state)
-
-    # Initialize arrays for original and permuted decoding
-    decoding = np.zeros((n_stages, n_windows, window_size, window_size))
-    decoding_perm = np.zeros((n_permutations, n_stages, n_windows, window_size, window_size))
-
-    # Convert mapping to numpy array if it's not already
-    colour_fac = np.array(variable_mapping)
-
-    # Compute original decoding matrices first
-    for i_stage in range(n_stages):
-        y_stage = labels_eq[i_stage][0, :]
-        for i_window in range(n_windows):
-
-            # Extract data for this stage and window
-            X_stage = data_eq[i_stage][i_window, :, :, tranc_window[0]:tranc_window[1] + 1]
-
-
-            # Compute original labels
-            y_colour = np.array(assign_lables(y_stage, colour_fac))
-
-            if method == "SVM":
-                decoding[i_stage, i_window, :, :] = decode_time(X_stage, y_colour, n_inter=1)
-            elif method == "Pearson":
-                decoder = NeuralCorrelationDecoder(across_time=True)
-                decoder.fit(X_stage, y_colour)
-                decoding[i_stage, i_window, :, :] = decoder.get_correlation()
-
-    print(f'Constructing null')
-    # Now compute permuted decoding matrices
-    for perm in tqdm(range(n_permutations)):
-        # For each stage, generate ONE permutation to use across all windows
-        for i_stage in range(n_stages):
-            # Get the first window's labels to determine permutation structure
-            y_stage_first = labels_eq[i_stage][0, :]
-            y_colour_first = np.array(assign_lables(y_stage_first, colour_fac))
-
-            # Create a single permutation for this stage
-            y_perm_indices = rng.permutation(len(y_colour_first))
-
-            # Use this permutation for all windows in this stage
-            for i_window in range(n_windows):
-                # Extract data for this stage and window
-                X_stage = data_eq[i_stage][i_window, :, :, tranc_window[0]:tranc_window[1] + 1]
-                y_stage = labels_eq[i_stage][i_window, :]
-
-                # Get original color labels
-                y_colour = np.array(assign_lables(y_stage, colour_fac))
-
-                # Apply the same permutation pattern to these labels
-                y_perm = y_colour[y_perm_indices]
-
-                # Compute decoding matrix with permuted labels
-
-
-                if method == "SVM":
-                    decoding_perm[perm, i_stage, i_window, :, :] = decode_time(X_stage, y_perm, n_inter=1)
-                elif method == "Pearson":
-                    decoder = NeuralCorrelationDecoder(across_time=True)
-                    decoder.fit(X_stage, y_perm)
-                    decoding_perm[perm, i_stage, i_window, :, :] = decoder.get_correlation()
-
-
-    return decoding, decoding_perm
-
-
-from sklearn.base import BaseEstimator, ClassifierMixin
-from sklearn.utils.validation import check_X_y, check_array, check_is_fitted
-from sklearn.utils.multiclass import unique_labels
-from scipy.stats import zscore
-from joblib import Parallel, delayed
-from numba import jit, prange
-import multiprocessing as mp
-
-@jit(nopython=True, parallel=True)
-def fast_pearsonr_matrix(X, Y):
-    """
-    Fast computation of Pearson correlation matrix using Numba.
-    X: (n_features, n_timepoints1)
-    Y: (n_features, n_timepoints2)
-    Returns: (n_timepoints1, n_timepoints2)
-    """
-    n_features, n_timepoints1 = X.shape
-    _, n_timepoints2 = Y.shape
-
-    corr_matrix = np.zeros((n_timepoints1, n_timepoints2))
-
-    for i in prange(n_timepoints1):
-        for j in prange(n_timepoints2):
-            x = X[:, i]
-            y = Y[:, j]
-
-            # Compute correlation manually for speed
-            x_mean = np.mean(x)
-            y_mean = np.mean(y)
-
-            num = np.sum((x - x_mean) * (y - y_mean))
-            den_x = np.sqrt(np.sum((x - x_mean) ** 2))
-            den_y = np.sqrt(np.sum((y - y_mean) ** 2))
-
-            if den_x == 0 or den_y == 0:
-                corr_matrix[i, j] = 0
-            else:
-                corr_matrix[i, j] = num / (den_x * den_y)
-
-    return corr_matrix
-
-
-@jit(nopython=True, parallel=True)
-def fast_pearsonr_vector(X, Y):
-    """
-    Fast computation of Pearson correlation vector using Numba.
-    X: (n_features, n_timepoints)
-    Y: (n_features, n_timepoints)
-    Returns: (n_timepoints,)
-    """
-    n_features, n_timepoints = X.shape
-    corr_vector = np.zeros(n_timepoints)
-
-    for t in prange(n_timepoints):
-        x = X[:, t]
-        y = Y[:, t]
-
-        x_mean = np.mean(x)
-        y_mean = np.mean(y)
-
-        num = np.sum((x - x_mean) * (y - y_mean))
-        den_x = np.sqrt(np.sum((x - x_mean) ** 2))
-        den_y = np.sqrt(np.sum((y - y_mean) ** 2))
-
-        if den_x == 0 or den_y == 0:
-            corr_vector[t] = 0
-        else:
-            corr_vector[t] = num / (den_x * den_y)
-
-    return corr_vector
-
-
-
-
-def _single_iteration(X, y, iteration_seed, across_time):
-    """
-    Single iteration of cross-validation for parallelization.
-
-    Parameters
-    ----------
-    X : ndarray
-        Input data
-    y : ndarray
-        Labels
-    iteration_seed : int
-        Random seed for this iteration
-    across_time : bool
-        Whether to compute across-time correlations
-
-    Returns
-    -------
-    correlation_result : ndarray
-        Correlation matrix or vector for this iteration
-    """
-
-    def condi_avg(data, labels):
-        """Optimized for binary classification."""
-        mask = labels.astype(bool)
-        condition_0 = data[~mask].mean(axis=0)
-        condition_1 = data[mask].mean(axis=0)
-        return np.array([condition_0, condition_1])
-
-
-    # Set seed for this iteration (convert numpy int to Python int)
-    seed_value = int(iteration_seed)  # Convert to native Python int
-    np.random.seed(seed_value)
-    random.seed(seed_value)
-
-    n_trials = X.shape[0]
-
-    # Create random split
-    idx_rnd = np.concatenate([np.zeros(n_trials // 2), np.ones(n_trials // 2)])
-    if (n_trials % 2) > 0:
-        idx_rnd = np.concatenate([idx_rnd, [1.0]])
-    np.random.shuffle(idx_rnd)
-
-    # Split data
-    X1 = X[idx_rnd < 1, :, :]
-    y1 = y[idx_rnd < 1]
-    X2 = X[idx_rnd > 0, :, :]
-    y2 = y[idx_rnd > 0]
-
-    # Z-score
-    X1 = zscore(X1, axis=1)
-    X2 = zscore(X2, axis=1)
-
-    # Compute condition averages
-    condition_averages1 = condi_avg(X1, y1)
-    condition_averages2 = condi_avg(X2, y2)
-
-    # Compute differences between conditions
-    diffTrain = condition_averages1[0, :, :] - condition_averages1[1, :, :]
-    diffTest = condition_averages2[0, :, :] - condition_averages2[1, :, :]
-
-    # Compute correlations using fast functions
-    if across_time:
-        # Temporal generalization: correlate across all time point pairs
-        corr1 = fast_pearsonr_matrix(diffTrain, diffTest)
-        corr2 = fast_pearsonr_matrix(diffTest, diffTrain)
-        return np.tanh(np.mean(np.arctanh(np.array([corr1, corr2])), axis=0))
-    else:
-        # Within-time correlations only
-        return fast_pearsonr_vector(diffTrain, diffTest)
-
-
-class NeuralCorrelationDecoder(BaseEstimator, ClassifierMixin):
-    """
-    Optimized neural correlation decoder with parallel processing and JIT compilation.
-
-    Parameters
-    ----------
-    n_iterations : int, default=10
-        Number of cross-validation iterations to perform
-    across_time : bool, default=True
-        If True, compute correlations across all time point pairs (temporal generalization)
-        If False, compute correlations only within the same time points
-    random_state : int, RandomState instance or None, default=None
-        Controls the randomness of the cross-validation splits
-    n_jobs : int, default=-1
-        Number of parallel jobs. -1 means use all available cores
-    batch_size : int, default=None
-        Batch size for parallel processing. If None, uses n_iterations // n_cores
-    """
-
-    def __init__(self, n_iterations=10, across_time=True, random_state=None,
-                 n_jobs=-1, batch_size=None):
-        self.n_iterations = n_iterations
-        self.across_time = across_time
-        self.random_state = random_state
-        self.n_jobs = n_jobs
-        self.batch_size = batch_size
-
-    def _validate_input(self, X, y=None):
-        """Validate input data format."""
-        if X.ndim != 3:
-            raise ValueError(f"Expected 3D array (n_trials, n_features, n_timepoints), "
-                             f"got {X.ndim}D array")
-
-        if y is not None:
-            if len(np.unique(y)) != 2:
-                raise ValueError("This decoder only supports binary classification "
-                                 f"(2 classes), got {len(np.unique(y))} classes")
-
-        return X, y
-
-    def fit(self, X, y):
-        """
-        Fit the neural correlation decoder using parallel processing.
-
-        Parameters
-        ----------
-        X : array-like of shape (n_trials, n_features, n_timepoints)
-            Training data
-        y : array-like of shape (n_trials,)
-            Target values (binary classification)
-
-        Returns
-        -------
-        self : object
-            Returns the instance itself
-        """
-        # Validate inputs
-        X, y = check_X_y(X, y, allow_nd=True)
-        X, y = self._validate_input(X, y)
-
-        # Store classes
-        self.classes_ = unique_labels(y)
-
-        # Generate seeds for each iteration to ensure reproducibility
-        if self.random_state is not None:
-            np.random.seed(self.random_state)
-            seeds = np.random.randint(0, 2 ** 31, self.n_iterations)
-        else:
-            seeds = np.random.randint(0, 2 ** 31, self.n_iterations)
-
-        # Determine number of jobs
-        n_jobs = self.n_jobs
-        if n_jobs == -1:
-            n_jobs = mp.cpu_count()
-        elif n_jobs <= 0:
-            n_jobs = max(1, mp.cpu_count() + n_jobs)
-
-        # Parallel computation of iterations
-        # Handle batch_size properly for joblib
-        parallel_kwargs = {'n_jobs': n_jobs}
-        if self.batch_size is not None:
-            parallel_kwargs['batch_size'] = self.batch_size
-
-        results = Parallel(**parallel_kwargs)(
-            delayed(_single_iteration)(X, y, seed, self.across_time)
-            for seed in seeds
-        )
-
-        # Convert results to numpy array and average using Fisher z-transform
-        corrs_iters = np.array(results)
-
-        # Handle potential NaN/inf values before arctanh
-        corrs_iters = np.clip(corrs_iters, -0.99999, 0.99999)
-
-        self.correlation_matrix_ = np.tanh(np.mean(np.arctanh(corrs_iters), axis=0))
-        self.is_fitted_ = True
-
-        return self
-
-    def get_correlation(self):
-        """Get the fitted correlation matrix."""
-        check_is_fitted(self, 'is_fitted_')
-        return self.correlation_matrix_
-
-    def set_params(self, **params):
-        """Set the parameters of this estimator."""
-        for key, value in params.items():
-            if hasattr(self, key):
-                setattr(self, key, value)
-            else:
-                raise ValueError(f"Invalid parameter {key}")
-        return self
-
-    def get_params(self, deep=True):
-        """Get parameters for this estimator."""
-        return {
-            'n_iterations': self.n_iterations,
-            'across_time': self.across_time,
-            'random_state': self.random_state,
-            'n_jobs': self.n_jobs,
-            'batch_size': self.batch_size
-        }
-
-def decode_time(X, y, n_inter=1, return_inter=False):
-    y = np.array(y)
-
-    scores_all = []
-    for n in range(n_inter):
-
-        clf = make_pipeline(
-            StandardScaler(),
-            SVM(C=5e-4))
-
-        time_gen = GeneralizingEstimator(clf, scoring="roc_auc", n_jobs=-1, verbose=True)
-
-        n_trls = X.shape[0]
-        idx_rnd = np.concatenate([np.zeros(n_trls // 2), np.ones(n_trls // 2)])
-        if (n_trls % 2) > 0:
-            idx_rnd = np.concatenate([idx_rnd, [1.0]])
-        random.shuffle(idx_rnd)
-
-
-        X1 = X[idx_rnd < 1, :, :]
-        y1 = y[idx_rnd < 1]
-        X2 = X[idx_rnd > 0, :, :]
-        y2 = y[idx_rnd > 0]
-
-        time_gen.fit(X1, y1)
-        score1 = time_gen.score(X2, y2)
-
-        time_gen.fit(X2, y2)
-        score2 = time_gen.score(X1, y1)
-        scores_all.append(np.array([score1, score2]).mean(0))
-
-    if return_inter:
-        return scores_all
-    else:
-        return np.mean(np.array(scores_all), axis=0)
-
-
-def dy_mask(obs, rnd, clusteralpha=0.05):
-    '''
-       looks for significant off diagonal reduction
-
-       Params:
-       obs: 2d observations
-       rnd: 3d randomizations (randomizations are in trailing dimension)
-
-       Outputs:
-       dynaMask: 1d dynamism index (time-resolved)
-
-   '''
-
-    # Computing the mask
-
-    # get the diagonal twice, reshape to allow easy comparison with full matrix
-    dynaObsA = np.diag(obs)[:, np.newaxis] - obs
-    dynaObsB = np.diag(obs)[np.newaxis, :] - obs
-
-    # do the same for the randomizations
-    dynaRndA = np.diagonal(rnd)[:, :, np.newaxis] - rnd.T
-    dynaRndB = np.diagonal(rnd)[:, np.newaxis, :] - rnd.T
-    dynaRndA = dynaRndA.T
-    dynaRndB = dynaRndB.T
-
-    pDynaA, labDynaA = permutation_test(obsdat=dynaObsA, rnddat=dynaRndA, tail=1,  clusteralpha=clusteralpha)
-    pDynaB, labDynaB = permutation_test(dynaObsB, dynaRndB, tail=1, clusteralpha=clusteralpha)
-
-    dynaMask = (pDynaA < 0.05) & (pDynaB < 0.05)
-
-    di = (np.mean(dynaMask, axis=0) + np.mean(dynaMask, axis=1)) / 2
-
-    return di, dynaMask
-
-
-def plot_time_generalisation(gs, fig, dec, rnd=None, times_sec=None, vmin=-1, vmax=1.0,
-                             matrix_limits=None, tick_positions=None,
-                             reference_lines=None, cmap="RdBu_r", title= "Coding stability", stat_test ='off-diagonal', clusteralpha=0.05, tail=0):
-    """
-    Plot time generalisation matrix with both dynamism and stability indices
-
-    This function creates a comprehensive visualisation of temporal generalisation
-    within a specified grid position.
-
-    Parameters:
-    -----------
-    gs : matplotlib GridSpec slice
-        GridSpec slice (e.g., gs[0,0] for single cell or gs[0,0:2] for spanning cells)
-    fig : matplotlib Figure
-        The figure object to add the subplot to
-    dec : ndarray
-        The decoding matrix to display (observation)
-    rnd : ndarray, optional
-        Randomization matrix with shape (time, time, n_randomizations)
-    times_sec : ndarray, optional
-        Time points in seconds. If None, creates a default range
-    vmin, vmax : float
-        Min and max values for color mapping
-    matrix_limits : tuple, optional
-        (min_idx, max_idx) limits for both x and y axes
-    tick_positions : list or ndarray, optional
-        Indices where to place ticks
-    reference_lines : list, optional
-        Time points where to place reference lines
-    cmap : str
-        Colormap to use
-    """
-    import numpy as np
-    import matplotlib.pyplot as plt
-    from scipy.ndimage import label
-
-    # Get current figure (use the provided fig parameter)
-    # fig is already provided as parameter
-
-    # Create default time range if not provided
-    if times_sec is None:
-        times_sec = np.linspace(-0.1, 1.1, dec.shape[-1])
-
-    # Create default tick positions if not provided
-    if tick_positions is None:
-        tick_positions = np.array([10, 60, 110])
-
-    # Create default reference lines if not provided
-    if reference_lines is None:
-        reference_lines = [0, 0.5, 1.0]
-
-    # Create subplot using the provided GridSpec
-    ax = fig.add_subplot(gs)
-
-    # Plot the main time generalization matrix
-    im = ax.matshow(
-        dec,
-        vmin=vmin,
-        vmax=vmax,
-        cmap=cmap,
-        origin="lower",
-    )
-
-    # Compute dynamism and stability if randomization data is provided
-    if rnd is not None:
-
-        if stat_test == 'off-diagonal':
-            # Get dynamism index and significance mask
-            _, sig_mask = dy_mask(dec, rnd, clusteralpha=clusteralpha)
-        elif stat_test == 'on-diagonal':
-            p_vals, cluster_labels = permutation_test(
-                obsdat=dec,
-                rnddat=rnd,
-                clustercorrect=True,
-                clusteralpha=clusteralpha,
-                tail = tail,
-            )
-            # Create mask for significant areas (p <= 0.05)
-            sig_mask = p_vals <= 0.05
-
-        # Plot significance masks on the main plot
-        if np.any(sig_mask):
-            # Use contour to outline significant dynamism areas
-            ax.contour(sig_mask, levels=[0.5], colors='black',
-                       linestyles='-', linewidths=0.8)
-
-    # Set tick labels
-    tick_labels = [f"{times_sec[i]:.1f}" for i in tick_positions]
-
-    # Set the ticks and labels
-    ax.set_xticks(tick_positions)
-    ax.set_xticklabels(tick_labels)
-    ax.set_yticks(tick_positions)
-    ax.set_yticklabels(tick_labels)
-
-    # Set matrix display limits if provided
-    if matrix_limits is not None:
-        min_idx, max_idx = matrix_limits
-        ax.set_xlim(min_idx, max_idx)
-        ax.set_ylim(min_idx, max_idx)
-
-    # Make sure ticks are at the bottom
-    ax.xaxis.set_ticks_position("bottom")
-
-    # Add reference lines to main plot
-    for time_val in reference_lines:
-        time_idx = np.argmin(np.abs(times_sec - time_val))
-        ax.axhline(time_idx, color="k", linestyle="--", linewidth=0.8)
-        ax.axvline(time_idx, color="k", linestyle="--", linewidth=0.8)
-
-    # Add axis labels
-    ax.set_xlabel('time (s)')
-    ax.set_ylabel('time (s)')
-
-    # Add title
-    ax.set_title(title)
-
-    # Add colorbar
-    cbar = fig.colorbar(im, ax=ax)
-    cbar.set_label("Pearson r")
-
 from mpl_toolkits.mplot3d.art3d import Poly3DCollection, Line3DCollection
 from sklearn.decomposition import PCA
 
@@ -6977,150 +7122,3 @@ def transform_xgen_dec_into_magnitude(decoding_matrix, decoding_matrix_null=None
     return delta_obs, delta_obs_rnd, delta_obs_rnd_ler
 
 
-def plot_magnitude(gs, fig, mag_obs, mag_null_within, mag_null_ler,
-                   title, y_lim=[-1,1], alpha=0.05):
-    """
-    Plot cross-generalization magnitude across learning stages as bars.
-
-    Parameters
-    ----------
-    mag_obs : array, shape (n_stages,)
-        Observed magnitude values
-    mag_null_within : array, shape (n_permutations, n_stages)
-        Null distribution where only cross-gen is shuffled
-    mag_null_ler : array, shape (n_permutations, n_stages)
-        Full permutation null (both within and cross-gen shuffled)
-    """
-    x_data = np.arange(len(mag_obs)) + 1
-    ax = fig.add_subplot(gs)
-
-    # Bar plot
-    ax.bar(x_data, mag_obs, color='black', width=0.6, zorder=5)
-
-    ax.set_xticks(x_data)
-    ax.set_xticklabels(x_data)
-    sns.despine(right=True, top=True)
-    ax.set_ylabel('% of ceiling')
-    ax.set_xlabel('learning stage')
-    ax.set_title(title)
-
-    # --- Null band from mag_null_within ---
-    null_flat = mag_null_within.flatten()
-    null_mean = null_flat.mean()
-
-    # Center around mean
-    null_centered = null_flat - null_mean
-    crit = np.quantile(np.abs(null_centered), 1 - alpha)
-
-    lower = null_mean - crit
-    upper = null_mean + crit
-
-    # Mean line
-    ax.axhline(null_mean, linestyle='--', linewidth=1,
-               color='black', zorder=-6, alpha=0.7)
-    ax.axhline(1, linestyle='--', linewidth=1,
-               color='black', zorder=-6, alpha=0.7)
-
-    # Null band
-    rect = patches.Rectangle(
-        (x_data[0] - 0.5, lower),
-        len(x_data),
-        upper - lower,
-        edgecolor=None,
-        facecolor='lightgrey',
-        zorder=-7,
-    )
-    ax.add_patch(rect)
-
-    # --- Horizontal bracket: Learning effect (Stage 1 vs Stage 4) ---
-    # Bracket displayed from BELOW with arms pointing UP
-    y_range = y_lim[1] - y_lim[0]
-    bracket_base = y_lim[0] + 0.2 * y_range  # Changed from y_lim[1] - 0.11
-    bracket_height = bracket_base - 0.06 * y_range  # Changed sign to go down
-    bracket_center = (x_data[0] + x_data[-1]) / 2
-    gap_size = 1.2
-
-    print('Learning effect (magnitude increase):')
-    p_value_learning = compute_p_value(mag_obs[-1], mag_obs[0],
-                                       mag_null_ler[:, -1], mag_null_ler[:, 0],
-                                       tail='greater')
-
-    # Draw bracket - arms now point UP from below
-    ax.plot([x_data[0], x_data[0]], [bracket_height, bracket_base],
-            color='black', linewidth=1)
-    ax.plot([x_data[-1], x_data[-1]], [bracket_height, bracket_base],
-            color='black', linewidth=1)
-    ax.plot([x_data[0], bracket_center - gap_size / 2],
-            [bracket_height, bracket_height], color='black', linewidth=1)
-    ax.plot([bracket_center + gap_size / 2, x_data[-1]],
-            [bracket_height, bracket_height], color='black', linewidth=1)
-
-    ax.text(bracket_center, bracket_height * 1.2, p_into_stars(p_value_learning),
-            fontsize=10, color='black', ha='center', va='bottom')  # Changed va to 'bottom'
-
-    ax.set_ylim(y_lim)
-
-    return ax
-
-def plot_significance_stars(ax, scores_real, scores_null, time_window, ylim, tail='two', y_position=None, dec_type=0):
-    """
-    Compute p-value and plot significance stars on a time-resolved decoding plot.
-
-    Parameters:
-    -----------
-    ax : matplotlib axis object
-        The axis to plot on
-    scores_real : array
-        Real decoding scores of shape [decoding_type, time_points]
-    scores_null : array
-        Null distribution scores of shape [n_reps, decoding_type, time_points]
-    time_window : tuple or list
-        (start, end) in milliseconds for the time window
-    ylim : tuple or list
-        (ymin, ymax) of the plot
-    tail : str
-        'two', 'greater', or 'less' for the statistical test
-    y_position : float, optional
-        Y-position for stars. If None, uses 90% of ylim range
-    """
-    # Compute p-value comparing first and last timepoint
-    p_val = compute_p_value(scores_real[dec_type, 0], scores_real[dec_type, -1],
-                            scores_null[:, dec_type, 0], scores_null[:, dec_type, -1],
-                            tail=tail)
-
-    # Convert p-value to stars
-    if p_val <= 0.001:
-        stars = '***'
-        font_size = 15
-        scaler_position = 0.8
-    elif p_val <= 0.01:
-        stars = '**'
-        font_size = 15
-        scaler_position = 0.8
-    elif p_val <= 0.05:
-        stars = '*'
-        font_size = 15
-        scaler_position = 0.8
-    elif p_val <= 0.1:
-        stars = '†'
-        font_size = 10
-        scaler_position = 0.8
-    else:
-        stars = 'ns'
-        font_size = 10
-        scaler_position = 0.9
-
-    # Calculate center of time window in seconds
-    tw_center = (((time_window[0] + time_window[1]) / 2) / 100) - 0.5
-
-    # Calculate y-position (default to 90% of y-range for better spacing)
-    if y_position is None:
-        y_position = ylim[0] + scaler_position * (ylim[1] - ylim[0])
-
-    # Plot stars
-    ax.text(tw_center, y_position, stars,
-            ha='center', va='center',
-            fontsize=font_size,
-            color='black')
-
-    return ax
