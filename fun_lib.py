@@ -17,19 +17,21 @@ from sklearn.discriminant_analysis import LinearDiscriminantAnalysis as LDA
 from sklearn.pipeline import make_pipeline
 from sklearn.preprocessing import StandardScaler
 from sklearn.svm import LinearSVC as SVM
+from sklearn.svm import SVC
 from scipy.ndimage import label
 import pickle
 from matplotlib import patches
 from numpy.linalg import norm
 from sklearn.decomposition import PCA
 import matplotlib.gridspec as gridspec
-
+import matplotlib
+matplotlib.use('TkAgg')
 plt.rcParams['svg.fonttype'] = 'none'
 from itertools import chain
 from mne.decoding import cross_val_multiscore
 import scipy.io as io
 import yaml
-
+from scipy import signal
 
 
 def assign_lables(labels, factor):
@@ -1634,6 +1636,13 @@ def decode(X, y, method='svm', n_inter=5, return_inter=False, n_jobs=None):
             if n_jobs != None:
                 clf2 = SlidingEstimator(clf2, verbose='warning', n_jobs=n_jobs)
 
+        if method == 'nonlin_svm':
+            clf1 = make_pipeline(StandardScaler(), SVC(kernel='poly', C=1.0))
+            clf2 = make_pipeline(StandardScaler(), SVC(kernel='poly', C=1.0))
+            if n_jobs != None:
+                clf1 = SlidingEstimator(clf1, verbose='warning', n_jobs=n_jobs)
+                clf2 = SlidingEstimator(clf2, verbose='warning', n_jobs=n_jobs)
+
         n_trls = X.shape[0]
         idx_rnd = np.concatenate([np.zeros(n_trls // 2), np.ones(n_trls // 2)])
         if (n_trls % 2) > 0:
@@ -2338,7 +2347,7 @@ def smooth(x, window_len=5, window='hanning'):
     return y[int(window_len / 2):-int((window_len / 2))]
 
 
-def permutation_test(obsdat, rnddat, clustercorrect=True, clusteralpha=0.05, tail=0):
+def permutation_test(obsdat, rnddat, clustercorrect=True, clusteralpha=0.05, tail=1):
     """
     Performs an (optionally cluster-corrected) permutation test of the observed
     data, given the pre-computed randomizations. rnddat must have one extra
@@ -2361,8 +2370,17 @@ def permutation_test(obsdat, rnddat, clustercorrect=True, clusteralpha=0.05, tai
     # uncorrected 'test'
     if not clustercorrect:
         for inds, value in np.ndenumerate(obsdat):
-            rnddat[inds].sort()
-            p[inds] = 1 - np.searchsorted(rnddat[inds], value) / rnddat.shape[-1]
+            rnd = np.sort(rnddat[inds])
+            if tail == 0:
+                pval = 2 * min(
+                    np.searchsorted(rnd, value, side='left'),
+                    rnd.shape[0] - np.searchsorted(rnd, value, side='right')
+                ) / rnd.shape[0]
+            elif tail == -1:
+                pval = np.searchsorted(rnd, value, side='right') / rnd.shape[0]
+            elif tail == 1:
+                pval = 1 - np.searchsorted(rnd, value, side='left') / rnd.shape[0]
+            p[inds] = pval
         return p
 
     # subfunction to compute clusterstats in one dataset (observed/randomized)
@@ -2405,24 +2423,31 @@ def permutation_test(obsdat, rnddat, clustercorrect=True, clusteralpha=0.05, tai
 
     # get observed clusters and maximum randomized clusterstats
     clusObs, clusNums, labelled = compute_clusterstats(obsdat)
-    clusRnd = np.asarray([compute_clusterstats(rnddat[..., x], False)
-                          for x in range(rnddat.shape[-1])])
+    clusRnd = [compute_clusterstats(rnddat[..., x], False)
+               for x in range(rnddat.shape[-1])]
+
     # treat randomizations with 0 cluster candidates as if their max was 0
     mymax = lambda x: 0 if len(x) == 0 else np.max(x)
-    clusRnd = [mymax(x) for x in clusRnd]
+    mymin = lambda x: 0 if len(x) == 0 else np.min(x)
+
+    if tail == 0:
+        clusRnd = [mymax(np.abs(x)) for x in clusRnd]
+        clusObs = [np.abs(s) for s in clusObs]
+    elif tail == -1:
+        clusRnd = [mymin(x) for x in clusRnd]
+    elif tail == 1:
+        clusRnd = [mymax(x) for x in clusRnd]
+
     clusRnd.sort()
 
-    # compare obs to rnd to obtain p-values
     for stat, num in zip(clusObs, clusNums):
         if tail == 0:
-            if stat < 0:
-                p[labelled == num] = np.searchsorted(clusRnd, stat) / rnddat.shape[-1]
-            elif stat > 0:
-                p[labelled == num] = 1 - np.searchsorted(clusRnd, stat) / rnddat.shape[-1]
+            pval = 1 - np.searchsorted(clusRnd, stat, side='left') / rnddat.shape[-1]
         elif tail == -1:
-            p[labelled == num] = np.searchsorted(clusRnd, stat) / rnddat.shape[-1]
+            pval = np.searchsorted(clusRnd, stat, side='right') / rnddat.shape[-1]
         elif tail == 1:
-            p[labelled == num] = 1 - np.searchsorted(clusRnd, stat) / rnddat.shape[-1]
+            pval = 1 - np.searchsorted(clusRnd, stat, side='left') / rnddat.shape[-1]
+        p[labelled == num] = pval
 
     return p, labelled
 
@@ -2921,7 +2946,7 @@ def compute_p_value(obs1, obs2, rnd1, rnd2, tail='greater'):
     elif tail == 'greater':
         p_val = np.sum(diff_rnd < diff) / diff_rnd.shape[0]
     elif tail == 'two':
-        p_val = 2 * np.sum(diff_rnd > np.abs(diff)) / diff_rnd.shape[0]
+        p_val = np.sum(np.abs(diff_rnd) >= abs(diff)) / diff_rnd.shape[0]
     else:
         raise ValueError('tail must be greater, smaller or two')
 
@@ -3223,7 +3248,7 @@ def plot_mean_and_ci(reward, no_reward, n_perm=10000, tail='greater'):
     plt.show()
 
 
-def plot_mean_and_ci_prop(gs, fig, reward_prop, n_perm=10000, tail='greater', stat='reg', plot_comp_dat=False):
+def plot_mean_and_ci_prop(gs, fig, reward_prop, n_perm=10000, tail='greater', stat='reg', plot_comp_dat=False, title='trial termination', y_label='no reward/reward\nproporiton', baseline_val=1.0, vmin=None,vmax=None):
     ax = fig.add_subplot(gs)
 
     x = list(range(1, len(reward_prop) + 1))
@@ -3237,8 +3262,8 @@ def plot_mean_and_ci_prop(gs, fig, reward_prop, n_perm=10000, tail='greater', st
     if stat == 'reg':
         # flatten reward_prop and construct list with stage labels
         y_flat = list(itertools.chain.from_iterable(reward_prop))
-        x_flat = [1] * len(reward_prop[0]) + [2] * len(reward_prop[1]) + [3] * len(reward_prop[2]) + [4] * len(
-            reward_prop[3])
+        x_flat =[[i+1] * len(reward_prop[i]) for i in range(len(reward_prop))]
+        x_flat = list(itertools.chain.from_iterable(x_flat))
         slope, intercept, p_value, r_value = compute_lin_reg(x_flat, y_flat, n_perm=n_perm, tail=tail)
 
         # annotate the plot with p-value
@@ -3261,11 +3286,12 @@ def plot_mean_and_ci_prop(gs, fig, reward_prop, n_perm=10000, tail='greater', st
         ax.errorbar(x, y2, yerr=y2_95ci, fmt='o', color='grey')
 
     ax.set_xlabel('learning stage')
-    ax.set_xticks([1, 2, 3, 4])
-    ax.set_ylabel('no reward/reward\nproporiton')
+    ax.set_xticks(x)
+    ax.set_ylabel(y_label)
+    ax.set_ylim([vmin,vmax])
     sns.despine(top=True, right=True)
-    ax.axhline(y=1, color='black', linestyle='--', linewidth=0.8)
-    ax.set_title('trial termination')
+    ax.axhline(y=baseline_val, color='black', linestyle='--', linewidth=0.8)
+    ax.set_title(title)
 
 
 def get_fixation_breaks(sessions_animals, experiment_label='exp1'):
@@ -3424,6 +3450,39 @@ def get_data_stages(observe_or_run='observe', file_name=None, return_data=False,
         return data, labels
 
 
+def create_sliding_windows_adaptive(sessions, n_stages=5, min_window_ratio=0.25):
+    """
+    Create n overlapping windows with adaptive overlap, ensuring continuous coverage.
+    """
+    total = len(sessions)
+
+    # Window size based on minimum ratio
+    window_size = max(2, int(np.ceil(total * min_window_ratio)))
+    window_size = min(window_size, total)
+
+    if n_stages == 1:
+        return [sessions]
+
+    # Calculate step size to evenly distribute windows across all sessions
+    # This ensures the last window ends at total while maintaining overlap
+    step = (total - window_size) / (n_stages - 1)
+
+    windows = []
+    for i in range(n_stages):
+        start = int(i * step)
+        end = min(start + window_size, total)
+
+        # Ensure we don't go past the end
+        if end > total:
+            end = total
+            start = max(0, end - window_size)
+
+        windows.append(sessions[start:end])
+
+    return windows
+
+
+
 def combine_session_lists(mode='time', which_exp='exp1', combine_all=True):
     with open('config.yml', 'r') as file:
         configs = yaml.safe_load(file)
@@ -3477,26 +3536,48 @@ def combine_session_lists(mode='time', which_exp='exp1', combine_all=True):
         if combine_all:
             ses_com = list(chain.from_iterable(ses_com))
 
-    elif (mode == 'balanced') & (which_exp == 'exp1'):
-        animal1_ses_labels = animal1_ses_labels[:8] + animal1_ses_labels[-8:]
-        animal2_ses_labels = animal2_ses_labels[:4] + animal2_ses_labels[-4:]
-        ses_wom = np.array_split(animal1_ses_labels, configs['ANALYSIS_PARAMS']['N_STAGES'])
-        ses_wil = np.array_split(animal2_ses_labels, configs['ANALYSIS_PARAMS']['N_STAGES'])
 
-        ses_com = []
-        for _ in range(configs['ANALYSIS_PARAMS']['N_STAGES']):
-            ses_com.append(list(ses_wom[_]))
-            ses_com.append(list(ses_wil[_]))
-        if combine_all:
-            ses_com = list(chain.from_iterable(ses_com))
+    elif mode == 'cxt_cost':
+        session_labels = [animal1_ses_labels, animal2_ses_labels]
+        _, _, switch_costs_cxt = get_switch_costs(session_labels)
 
-    elif (mode == 'balanced_stages') & (which_exp == 'exp1'):
-        ses_wom = np.array_split(animal1_ses_labels, configs['ANALYSIS_PARAMS']['N_STAGES'])
-        ses_wil = [animal2_ses_labels[:3], animal2_ses_labels[3:5], animal2_ses_labels[5:7], animal2_ses_labels[-3:]]
+        sessions_sorted = []
+        for i_anim in range(2):
+            dat = switch_costs_cxt[i_anim]
+            sort_idx = np.argsort(dat)
+            sessions_sorted.append(np.array(session_labels[i_anim])[sort_idx])
 
+        ses_wom = np.array_split(sessions_sorted[0], configs['ANALYSIS_PARAMS']['N_STAGES'])
+        ses_wil = np.array_split(sessions_sorted[1], configs['ANALYSIS_PARAMS']['N_STAGES'])
         ses_com = []
         for _ in range(configs['ANALYSIS_PARAMS']['N_STAGES']):
             ses_com.append(list(ses_wom[_]) + list(ses_wil[_]))
+        if combine_all:
+            ses_com = list(chain.from_iterable(ses_com))
+
+    elif mode == 'colour_cost':
+        session_labels = [animal1_ses_labels, animal2_ses_labels]
+        switch_costs_col, _, _ = get_switch_costs(session_labels)
+
+        sessions_sorted = []
+        for i_anim in range(2):
+            dat = switch_costs_col[i_anim]
+            sort_idx = np.argsort(dat)
+            sessions_sorted.append(np.array(session_labels[i_anim])[sort_idx])
+
+        ses_wom = np.array_split(sessions_sorted[0], configs['ANALYSIS_PARAMS']['N_STAGES'])
+        ses_wil = np.array_split(sessions_sorted[1], configs['ANALYSIS_PARAMS']['N_STAGES'])
+        ses_com = []
+        for _ in range(configs['ANALYSIS_PARAMS']['N_STAGES']):
+            ses_com.append(list(ses_wom[_]) + list(ses_wil[_]))
+        if combine_all:
+            ses_com = list(chain.from_iterable(ses_com))
+
+    elif mode == 'sliding_window':
+
+        parts_animal1 = create_sliding_windows_adaptive(animal1_ses_labels, n_stages=configs['ANALYSIS_PARAMS']['N_STAGES'], min_window_ratio=0.25)
+        parts_animal2 = create_sliding_windows_adaptive(animal2_ses_labels, n_stages=configs['ANALYSIS_PARAMS']['N_STAGES'], min_window_ratio=0.25)
+        ses_com = [pw + pwi for pw, pwi in zip(parts_animal1, parts_animal2)]
         if combine_all:
             ses_com = list(chain.from_iterable(ses_com))
 
@@ -3602,9 +3683,9 @@ def plot_regression(df, n_perm=100000):
     plt.show()
 
 
-def creat_plot_grid(n_rows, n_cols, size):
+def creat_plot_grid(n_rows, n_cols, size, width_ratios=None):
     fig = plt.figure(figsize=(size * n_cols, (size * n_rows) * 0.8))
-    gs = gridspec.GridSpec(n_rows, n_cols, figure=fig)
+    gs = gridspec.GridSpec(n_rows, n_cols, figure=fig, width_ratios=width_ratios)
     return fig, gs
 
 
@@ -3741,22 +3822,23 @@ def run_moving_window_decoding(data_eq, labels_eq, variables, time_window, metho
             return shattering_dim, decoding
 
 
-def shuffle_stages(stage1, stage4, label1):
+def shuffle_stages(stage1, stage4, label1, seed=None):
+    if seed is None:
+        random.seed()
+    else:
+        random.seed(seed)
     data_all = np.concatenate((stage1, stage4), axis=2)
     n_cells_stage1 = stage1.shape[2]
-    n_cells_all = data_all.shape[2]
 
-    idc_cells = np.arange(n_cells_all)
-    random.shuffle(idc_cells)
+    idc_cells = np.arange(data_all.shape[2])
+    random.shuffle(idc_cells)                   # Python’s shuffle
+
     dat_stage1_shuffled = data_all[:, :, idc_cells[:n_cells_stage1], :]
     dat_stage4_shuffled = data_all[:, :, idc_cells[n_cells_stage1:], :]
-    data_epochs1and4 = [dat_stage1_shuffled, dat_stage4_shuffled]
-    labels_epochs1and4 = [label1, label1]
-
-    return data_epochs1and4, labels_epochs1and4
+    return [dat_stage1_shuffled, dat_stage4_shuffled], [label1, label1]
 
 
-def run_moving_window_decoding_ler_null(data1, data2, labels1, variables, time_window, n_reps=100, if_xgen=True):
+def run_moving_window_decoding_ler_null(data1, data2, labels1, variables, time_window, n_reps=100, if_xgen=True, method='svm'):
 
 
     if time_window is not None:
@@ -3771,11 +3853,11 @@ def run_moving_window_decoding_ler_null(data1, data2, labels1, variables, time_w
                 shattering_dim_rep, decoding_rep, xgen_decoding_rep = run_moving_window_decoding(data_epochs1and4,
                                                                                                  labels_epochs1and4,
                                                                                                  variables, time_window,
-                                                                                                 if_xgen=if_xgen)
+                                                                                                 if_xgen=if_xgen, method=method)
                 xgen_decoding_rnd[rep, :, :] = xgen_decoding_rep
             else:
                 shattering_dim_rep, decoding_rep = run_moving_window_decoding(data_epochs1and4, labels_epochs1and4,
-                                                                              variables, time_window, if_xgen=if_xgen)
+                                                                              variables, time_window, if_xgen=if_xgen, method=method)
 
             shattering_dim_rnd[rep, :, :] = shattering_dim_rep
             decoding_rnd[rep, :, :] = decoding_rep
@@ -3796,7 +3878,7 @@ def run_moving_window_decoding_ler_null(data1, data2, labels1, variables, time_w
                 print('Time point: ', i_time + 1, ' of ', data1[0].shape[-1] - 50)
 
                 shattering_dim_t, decoding_t = run_moving_window_decoding(data_epochs1and4, labels_epochs1and4,
-                                                                              variables, time_sliding, if_xgen=False)
+                                                                              variables, time_sliding, if_xgen=False, method=method)
 
                 shattering_dim_rnd[i_time-30, i_rep, :, :] = shattering_dim_t
                 decoding_rnd[i_time-30, i_rep, :, :] = decoding_t
@@ -3854,41 +3936,92 @@ def line_plot_timevar(gs, fig, x, y, color, xlabel, ylabel, title, ylim, xlim, x
 
 
 def plot_sig_bars(ax, dat_obs, dat_rnd, times, tails_lis, colour_lis, p_threshold=0.05, plot_chance_lvl=0.5,
-                  if_smooth=False, variable_name='[name here]'):
-    clt_times, clt_labels = compute_perm_stats(dat_obs,
-                                               dat_rnd,
+                  if_smooth=False, variable_name='[name here]', time_window=(-0.2, 1.4)):
+    """
+    Plot significance bars for cluster-corrected permutation tests.
+
+    Parameters:
+    -----------
+    ax : matplotlib axis
+        Axis to plot on
+    dat_obs : ndarray
+        Observed data
+    dat_rnd : ndarray
+        Randomization data
+    times : ndarray
+        Time points
+    tails_lis : list
+        Tail directions for tests
+    colour_lis : list
+        Colors for each condition
+    p_threshold : float
+        P-value threshold for significance
+    plot_chance_lvl : float
+        Y-position for significance bars
+    if_smooth : bool
+        Whether to smooth data
+    variable_name : str
+        Name for printing results
+    time_window : tuple or None
+        (start_time, end_time) to restrict analysis to specific time window.
+        If None, uses entire time range.
+    """
+
+    # Restrict to time window if specified
+    if time_window is not None:
+        start_time, end_time = time_window
+        # Find indices corresponding to time window
+        time_mask = (times >= start_time) & (times <= end_time)
+        time_indices = np.where(time_mask)[0]
+
+        # Subset data and times
+        dat_obs_subset = dat_obs[:, time_indices]
+        dat_rnd_subset = dat_rnd[:, :, time_indices]
+        times_subset = times[time_indices]
+
+        print(f'Restricting analysis to time window: {start_time:.3f}s to {end_time:.3f}s')
+    else:
+        dat_obs_subset = dat_obs
+        dat_rnd_subset = dat_rnd
+        times_subset = times
+
+    # Run permutation test on subset
+    clt_times, clt_labels = compute_perm_stats(dat_obs_subset,
+                                               dat_rnd_subset,
                                                tails=tails_lis,
                                                if_smooth=if_smooth
                                                )
 
     print('Cluster perm. test: ' + variable_name)
-    for p in range(dat_obs.shape[0]):
-        slices = get_slices(clt_times[p], clt_labels[p], times)
+    for p in range(dat_obs_subset.shape[0]):
+        slices = get_slices(clt_times[p], clt_labels[p], times_subset)
         for s_i in range(slices.shape[0]):
             if slices[s_i, 0] <= p_threshold:
-                start_time = slices[s_i, 1]
-                end_time = slices[s_i, 2]
+                start_time_sig = slices[s_i, 1]
+                end_time_sig = slices[s_i, 2]
                 p_value = slices[s_i, 0]
                 # Print time window for each significant cluster
                 print(
-                    f"   significant cluster found: {start_time:.3f}s to {end_time:.3f}s (duration: {end_time - start_time:.3f}s, p={p_value:.3f})")
+                    f"   significant cluster found: {start_time_sig:.3f}s to {end_time_sig:.3f}s (duration: {end_time_sig - start_time_sig:.3f}s, p={p_value:.3f})")
 
                 if p == 2:
-                    ax.hlines(xmin=start_time, xmax=end_time, colors=colour_lis[p],
+                    ax.hlines(xmin=start_time_sig, xmax=end_time_sig, colors=colour_lis[p],
                               y=plot_chance_lvl - (p / 80), linestyles=(0, (1, 0.5)),
                               linewidth=2)
                 else:
-                    ax.hlines(xmin=start_time, xmax=end_time, colors=colour_lis[p],
+                    ax.hlines(xmin=start_time_sig, xmax=end_time_sig, colors=colour_lis[p],
                               y=plot_chance_lvl - (p / 80),
                               linewidth=2)
 
     return
 
-def plot_scatter(gs, fig, x, y, scale, yaxis_label, xaxis_label, offset_axis=20, overlay_model=None, title=None,
-                 plot_reg=False):
+def plot_scatter(gs, fig, x, y, scale, yaxis_label, xaxis_label, offset_axis=20, overlay_model='contour', title=None,
+                 plot_reg=False, dot_size=10, color='darkgrey', edgecolor='dimgrey', mass_levels=(0.68, 0.95, 0.997), out_factor=1.0, kde_smooth=1.4, reg_null=None):
+    from scipy.stats import gaussian_kde
+
     ax = fig.add_subplot(gs)
-    ax.scatter(x, y, color='darkgrey', s=10, zorder=-5,
-               edgecolor='dimgrey')
+    ax.scatter(x, y, color=color, s=dot_size, zorder=-5,
+               edgecolor=edgecolor)
     # move the left spine (y axis) to the right
     ax.spines['left'].set_position(('axes', 0.5))
     # move the bottom spine (x axis) up
@@ -3905,7 +4038,69 @@ def plot_scatter(gs, fig, x, y, scale, yaxis_label, xaxis_label, offset_axis=20,
     ax.set_ylabel(yaxis_label, labelpad=offset_axis)
     ax.set_title(title)
 
-    if overlay_model == 'random':
+    # Add density contour plot when overlay_model is None
+    if overlay_model == 'contour':
+        def remove_outliers_iqr(x, y, factor=1.25):
+            """Remove outliers using Interquartile Range method"""
+            # Calculate IQR for both dimensions
+            q1_x, q3_x = np.percentile(x, [25, 75])
+            q1_y, q3_y = np.percentile(y, [25, 75])
+            iqr_x = q3_x - q1_x
+            iqr_y = q3_y - q1_y
+
+            # Define outlier bounds
+            lower_x, upper_x = q1_x - factor * iqr_x, q3_x + factor * iqr_x
+            lower_y, upper_y = q1_y - factor * iqr_y, q3_y + factor * iqr_y
+
+            # Keep only non-outlier points
+            mask = (x >= lower_x) & (x <= upper_x) & (y >= lower_y) & (y <= upper_y)
+            return x[mask], y[mask]
+
+            # Remove outliers for density estimation (but keep all points for scatter plot)
+
+        x_clean, y_clean = remove_outliers_iqr(x, y, factor=out_factor)
+
+        # Create 2D kernel density estimation on cleaned data
+        data_points = np.vstack([x_clean, y_clean])
+
+        # Use Scott's rule with a slightly larger bandwidth for smoother contours
+        kde = gaussian_kde(data_points)
+        kde.set_bandwidth(kde.factor * kde_smooth)  # Increase bandwidth by 20% for smoothing
+
+
+        # evaluation grid always ±scale – only the *frame* changes with scale
+        xx, yy = np.mgrid[-scale:scale:200j, -scale:scale:200j]
+        density = kde(np.vstack([xx.ravel(), yy.ravel()])).reshape(xx.shape)
+
+        # cell area for integrating probability mass
+        dx = (2 * scale) / (density.shape[0] - 1)
+        dy = (2 * scale) / (density.shape[1] - 1)
+        cell_area = dx * dy
+
+        # flatten, sort by descending density
+        dens_flat = density.ravel()
+        order = np.argsort(dens_flat)[::-1]
+        dens_sorted = dens_flat[order]
+
+        # cumulative mass for each density threshold
+        cum_mass = np.cumsum(dens_sorted * cell_area)
+
+        levels = []
+        for p in mass_levels:
+            idx = np.searchsorted(cum_mass, p)
+            # guard against pathological cases (e.g. not enough grid cells)
+            idx = min(idx, len(dens_sorted) - 1)
+            levels.append(dens_sorted[idx])
+
+        # plot contour lines
+        levels = np.unique(np.sort(levels))
+        ax.contour(xx, yy, density,
+                   levels=levels,
+                   colors='black',
+                   linewidths=0.7,
+                   zorder=5)
+
+    elif overlay_model == 'random':
         m_rnd = np.diag(np.cov(np.array([x, y]))).mean()
         n_circles = 4
         rnd_std = m_rnd ** 0.5
@@ -3925,33 +4120,49 @@ def plot_scatter(gs, fig, x, y, scale, yaxis_label, xaxis_label, offset_axis=20,
         x_lis = np.zeros(len(y_lis))
         ax.plot(x_lis, y_lis, color=sns.diverging_palette(230, 20, n=4)[0], linewidth=3, zorder=5)
 
+
     if plot_reg:
         b = np.linalg.lstsq(x[:, None], y[:, None])[0]
         x_line = np.linspace(-scale, scale, 100)
         ax.plot(x_line, b[0] * x_line, c='black', linewidth=0.8)
 
         corr = np.corrcoef(x, y)[0, 1]
-        ax.text(scale * 1, scale * 0.7, 'r=' + str(round(corr, 2)), fontsize=11, color='black', ha='center',
+        stars = ''
+        if reg_null is not None:
+            p_val = np.mean(np.abs(reg_null) >= np.abs(corr))
+            if p_val < 0.001:
+                stars = '***'
+            elif p_val < 0.01:
+                stars = '**'
+            elif p_val < 0.05:
+                stars = '*'
+            else:
+                stars = 'ns'
+
+        ax.text(scale * 1, scale * 0.7, 'r=' + str(round(corr, 2)) +',' + stars, fontsize=11, color='black', ha='center',
                 va='center')
 
     return
 
-
-def plot_cov(gs, fig, dat, scale=0.007):
+def plot_cov(gs, fig, dat, scale=0.007, labels=['c', 's', 'xor'], title='covariance\n(between coefficients)', compute_cov=True):
     from mpl_toolkits.axes_grid1 import make_axes_locatable
     ax = fig.add_subplot(gs)
     norm = colors.TwoSlopeNorm(vmin=-scale, vcenter=0, vmax=scale)
-    im = ax.imshow(np.cov(dat.T), cmap=sns.diverging_palette(230, 20, as_cmap=True), norm=norm,
+    if compute_cov:
+        data_plot = np.cov(dat.T)
+    else:
+        data_plot = dat
+    im = ax.imshow(data_plot, cmap=sns.diverging_palette(230, 20, as_cmap=True), norm=norm,
                    origin='lower')
     ax.set_yticks([0, 1, 2])
     ax.set_xticks([0, 1, 2])
-    ax.set_yticklabels(['c', 's', 'xor'])
-    ax.set_xticklabels(['c', 's', 'xor'])
+    ax.set_yticklabels(labels)
+    ax.set_xticklabels(labels)
     divider = make_axes_locatable(ax)
     cax = divider.append_axes('right', size='5%', pad=0.05)
     cbar = fig.colorbar(im, cax=cax, orientation='vertical')
     cbar.formatter.set_powerlimits((0, 0))
-    ax.set_title('covariance\n(between coefficients)')
+    ax.set_title(title)
     return
 
 
@@ -4044,7 +4255,7 @@ def compute_dist_random(selectivity_coeffs_stages, n_bootstraps=1000, rnd_model=
         KL_r /= KL_opt_avg
         KL_opt /= KL_opt_avg
 
-    p = 1 * (np.sum(KL_r >= np.mean(KL, axis=-1, keepdims=True), axis=-1) / n_bootstraps)
+    p = np.sum(KL_r >= np.mean(KL, axis=-1, keepdims=True), axis=-1) / n_bootstraps
     if bon_correction:
         p = p * n_stages
     p_vals.append(p)
@@ -4192,7 +4403,6 @@ def plot_distance(gs, fig, dat_matrix, title, pvals=None, dist_dot=30, x_stages_
     ax.set_title(title)
 
     mean_dat_distances = dat_matrix[0].mean(-1)
-    print(title)
     for _ in range(n_stages):
         print('    Stage ', str(_+1), '   M = ', str(round(mean_dat_distances[_], 3)), ', p-value = ', str(round(pvals[_], 3)))
 
@@ -4297,7 +4507,7 @@ def plot_regression_sup(x, y, gs, fig, color='black', xlabel=None, ylabel=None, 
     sns.despine(top=True, right=True)
 
 
-def run_time_resolved_decoding(data, labels, if_save=True, fname='exp1_decoding_time', mode='within_stage', time_resolved=False):
+def run_time_resolved_decoding(data, labels, if_save=True, fname='exp1_decoding_time', mode='within_stage', time_resolved=False, method='svm'):
     with open('config.yml') as file:
         config = yaml.full_load(file)
 
@@ -4321,7 +4531,9 @@ def run_time_resolved_decoding(data, labels, if_save=True, fname='exp1_decoding_
                                                                                    labels_eq[0],
                                                                                    variables, time_window=time_sliding,
                                                                                    n_reps=config['ANALYSIS_PARAMS'][
-                                                                                       'N_REPS'], if_xgen=False)
+                                                                                       'N_REPS'], if_xgen=False,
+                                                                                   method=method
+                                                                                   )
             shattering_dim_rnd_time.append(shattering_dim_rnd)
             decoding_rnd_time.append(decoding_rnd)
 
@@ -4341,7 +4553,7 @@ def run_time_resolved_decoding(data, labels, if_save=True, fname='exp1_decoding_
                                                                                labels_eq[0],
                                                                                variables, time_window=None,
                                                                                n_reps=config['ANALYSIS_PARAMS'][
-                                                                                   'N_REPS'], if_xgen=False)
+                                                                                   'N_REPS'], if_xgen=False, method=method)
 
         if if_save:
             data_exp1 = [shattering_dim_rnd_time, decoding_rnd_time]
@@ -4360,7 +4572,7 @@ def run_time_resolved_decoding(data, labels, if_save=True, fname='exp1_decoding_
             time_sliding = [i_time, i_time + 1]
             print('Time point: ', i_time + 1, ' of ', data_eq[0].shape[-1] - 50)
             shattering_dim, decoding, decoding_null = run_moving_window_decoding(data_eq, labels_eq, variables,
-                                                                                 time_window=time_sliding, method='svm',
+                                                                                 time_window=time_sliding, method=method,
                                                                                  if_xgen=False, if_null=True,
                                                                                  n_reps=config['ANALYSIS_PARAMS'][
                                                                                      'N_REPS'])
@@ -4429,7 +4641,7 @@ def run_pca_movewin(data, labels, n_comps=4, factor=[0, 0, 1, 1, 2, 2, 3, 3], n_
     pc_var = np.zeros((len(data), 4, config['ANALYSIS_PARAMS']['N_WINDOWS'], n_reps))
     for i_stage in range(len(data)):
         data_re = data[i_stage][:, :, :,
-                       config['ANALYSIS_PARAMS']['TIME_WINDOW'][0]:config['ANALYSIS_PARAMS']['TIME_WINDOW'][1]]
+                       config['ANALYSIS_PARAMS']['TIME_WINDOW_AVG_1'][0]:config['ANALYSIS_PARAMS']['TIME_WINDOW_AVG_1'][1]]
         for i_rep in range(n_reps):
             idx_rnd = np.arange(data_re.shape[2])
             idx_rnd = np.random.choice(idx_rnd, min_cell, replace=False)
@@ -4710,9 +4922,9 @@ def run_decoding_colour_locked(data_wins, labels_wins, window_early, factors, mo
 
 def run_decoding_ler_null_colour_locked(data_wins, labels_wins, factors, time_window=[90, 100], n_reps=10):
     dat_stage1 = data_wins[0]
-    dat_stage4 = data_wins[3]
+    dat_stage4 = data_wins[-1]
     label_stage1 = labels_wins[0]
-    label_stage4 = labels_wins[3]
+    label_stage4 = labels_wins[-1]
 
     data_all = np.concatenate((dat_stage1, dat_stage4), axis=2)
     n_cells_stage1 = dat_stage1.shape[2]
@@ -4751,6 +4963,7 @@ def run_decoding_shape_locked(data_wins, labels_wins, time_window, factors):
     scores_shape = np.zeros((2, n_stages, config['ANALYSIS_PARAMS']['N_WINDOWS']))
     scores_width = np.zeros((2, n_stages, config['ANALYSIS_PARAMS']['N_WINDOWS']))
     scores_xor = np.zeros((2, n_stages, config['ANALYSIS_PARAMS']['N_WINDOWS']))
+    scores_xor2 = np.zeros((2, n_stages, config['ANALYSIS_PARAMS']['N_WINDOWS']))
     for i_stage in range(n_stages):
         for i_window in range(config['ANALYSIS_PARAMS']['N_WINDOWS']):
             X = np.mean(data_wins[i_stage][i_window, :, :, time_window[0]:time_window[1]], axis=-1)
@@ -4760,6 +4973,7 @@ def run_decoding_shape_locked(data_wins, labels_wins, time_window, factors):
             y_shape = np.array(assign_lables(y, factors[2]))
             y_width = np.array(assign_lables(y, factors[3]))
             y_xor = np.array(assign_lables(y, factors[4]))
+            y_xor2 = np.array(assign_lables(y, factors[5]))
 
             scores_context[0, i_stage, i_window] = decode(X, y_context)
             scores_set[0, i_stage, i_window] = decode(X, y_set)
@@ -4773,6 +4987,7 @@ def run_decoding_shape_locked(data_wins, labels_wins, time_window, factors):
             scores_shape[0, i_stage, i_window] = decode(X, y_shape)
             scores_width[0, i_stage, i_window] = decode(X, y_width)
             scores_xor[0, i_stage, i_window] = decode(X, y_xor)
+            scores_xor2[0, i_stage, i_window] = decode(X, y_xor2)
 
             X1_set1, X2_set2, y1_set1, y2_set2 = split_data_dec(X, y_shape, y_splitting=y_set)
             scores_shape[1, i_stage, i_window] = decode_xgen(X1_set1, X2_set2, y1_set1, y2_set2, n_jobs=None)
@@ -4784,14 +4999,14 @@ def run_decoding_shape_locked(data_wins, labels_wins, time_window, factors):
             scores_xor[1, i_stage, i_window] = decode_xgen(X1_set1, X2_set2, y1_set1, y2_set2, n_jobs=None)
 
     return scores_context.mean(-1), scores_set.mean(-1), scores_shape.mean(-1), scores_width.mean(-1), scores_xor.mean(
-        -1)
+        -1), scores_xor2.mean(-1)
 
 
 def run_decoding_ler_null_shape_locked(data_wins, labels_wins, factors, time_window=[140, 150], n_reps=10):
     dat_stage1 = data_wins[0]
-    dat_stage4 = data_wins[3]
+    dat_stage4 = data_wins[-1]
     label_stage1 = labels_wins[0]
-    label_stage4 = labels_wins[3]
+    label_stage4 = labels_wins[-1]
 
     data_all = np.concatenate((dat_stage1, dat_stage4), axis=2)
     n_cells_stage1 = dat_stage1.shape[2]
@@ -4804,6 +5019,7 @@ def run_decoding_ler_null_shape_locked(data_wins, labels_wins, factors, time_win
     scores_shape_rnd = np.zeros((n_reps, 2, n_stages))
     scores_width_rnd = np.zeros((n_reps, 2, n_stages))
     scores_xor_rnd = np.zeros((n_reps, 2, n_stages))
+    scores_xor2_rnd = np.zeros((n_reps, 2, n_stages))
 
     for rep in range(n_reps):
         print("Rep: ", rep + 1, " of ", n_reps)
@@ -4813,7 +5029,7 @@ def run_decoding_ler_null_shape_locked(data_wins, labels_wins, factors, time_win
         dat_stage4_shuffled = data_all[:, :, idc_cells[n_cells_stage1:], :]
         data_epochs1and4 = [dat_stage1_shuffled, dat_stage4_shuffled]
         labels_epochs1and4 = [label_stage1, label_stage4]
-        scores_context_rnd_rep, scores_set_rnd_rep, scores_shape_rnd_rep, scores_width_rnd_rep, scores_xor_rnd_rep = run_decoding_shape_locked(
+        scores_context_rnd_rep, scores_set_rnd_rep, scores_shape_rnd_rep, scores_width_rnd_rep, scores_xor_rnd_rep, scores_xor2_rnd_rep = run_decoding_shape_locked(
             data_epochs1and4,
             labels_epochs1and4,
             time_window,
@@ -4824,15 +5040,22 @@ def run_decoding_ler_null_shape_locked(data_wins, labels_wins, factors, time_win
         scores_shape_rnd[rep, :, :] = scores_shape_rnd_rep
         scores_width_rnd[rep, :, :] = scores_width_rnd_rep
         scores_xor_rnd[rep, :, :] = scores_xor_rnd_rep
+        scores_xor2_rnd[rep, :, :] = scores_xor2_rnd_rep
 
-    return scores_context_rnd, scores_set_rnd, scores_shape_rnd, scores_width_rnd, scores_xor_rnd
+    return scores_context_rnd, scores_set_rnd, scores_shape_rnd, scores_width_rnd, scores_xor_rnd, scores_xor2_rnd
 
 
-def plot_dec_xgen(gs, fig, dec_score, dec_score_ler_null, title, y_lim, tails=['smaller', 'smaller'], null_within=None):
+def plot_dec_xgen(gs, fig, dec_score, dec_score_ler_null, title, y_lim,
+                  tails=['smaller', 'smaller'], null_within=None, alpha=0.05,
+                  vertical_bracket_scale=1.0):
     x_data = np.arange(dec_score.shape[1]) + 1
     ax = fig.add_subplot(gs)
+
+    # cross-generalisation curve (grey)
     ax.plot(x_data, dec_score[1, :], color='grey')
     ax.scatter(x_data, dec_score[1, :], color='grey')
+
+    # decoding curve (black)
     ax.plot(x_data, dec_score[0, :], color='black', zorder=5)
     ax.scatter(x_data, dec_score[0, :], color='black', zorder=5)
 
@@ -4845,32 +5068,138 @@ def plot_dec_xgen(gs, fig, dec_score, dec_score_ler_null, title, y_lim, tails=['
     ax.set_ylim(y_lim)
     ax.set_title(title)
 
-    print('Cross-generalisation decoding scores')
-    p_value_xgen = compute_p_value(dec_score[1, -1], dec_score[1, 0], dec_score_ler_null[:, 1, -1],
-                                   dec_score_ler_null[:, 1, 0], tail=tails[1])
-    ax.text(2.5, 0.4, p_into_stars(p_value_xgen), fontsize=10, color='grey', ha='center', va='center')
+    # Calculate top positions for brackets
+    y_range = y_lim[1] - y_lim[0]
+    top_margin = y_lim[1] - 0.11 * y_range  # Start brackets from near top
+    bracket_spacing = 0.10 * y_range  # Space between brackets
+    bracket_arm_height = 0.06 * y_range  # Height of bracket arms
+    gap_size = 0.8  # Size of gap for stars
+
+    # --- Bracket for Decoding (stage 1 vs stage 4) - topmost ---
     print('Decoding scores')
-    p_value_dec = compute_p_value(dec_score[0, -1], dec_score[0, 0], dec_score_ler_null[:, 0, -1],
-                                  dec_score_ler_null[:, 0, 0], tail=tails[0])
-    ax.text(2.5, 0.75, p_into_stars(p_value_dec), fontsize=10, color='black', ha='center', va='center')
+    p_value_dec = compute_p_value(dec_score[0, -1], dec_score[0, 0],
+                                  dec_score_ler_null[:, 0, -1],
+                                  dec_score_ler_null[:, 0, 0],
+                                  tail=tails[0])
 
+    # Draw bracket for decoding at top
+    dec_bracket_base = top_margin
+    dec_bracket_height = dec_bracket_base + bracket_arm_height
+    dec_bracket_center = (x_data[0] + x_data[-1]) / 2
+
+    # Vertical arms
+    ax.plot([x_data[0], x_data[0]], [dec_bracket_base, dec_bracket_height],
+            color='black', linewidth=1)
+    ax.plot([x_data[-1], x_data[-1]], [dec_bracket_base, dec_bracket_height],
+            color='black', linewidth=1)
+    # Horizontal top - left side
+    ax.plot([x_data[0], dec_bracket_center - gap_size/2], [dec_bracket_height, dec_bracket_height],
+            color='black', linewidth=1)
+    # Horizontal top - right side
+    ax.plot([dec_bracket_center + gap_size/2, x_data[-1]], [dec_bracket_height, dec_bracket_height],
+            color='black', linewidth=1)
+    # Stars in the gap
+    ax.text(dec_bracket_center, dec_bracket_height,
+            p_into_stars(p_value_dec),
+            fontsize=10, color='black', ha='center', va='center')
+
+    # --- Bracket for Cross-generalisation (stage 1 vs stage 4) - below decoding ---
+    print('Cross-generalisation decoding scores')
+    p_value_xgen = compute_p_value(dec_score[1, -1], dec_score[1, 0],
+                                   dec_score_ler_null[:, 1, -1],
+                                   dec_score_ler_null[:, 1, 0],
+                                   tail=tails[1])
+
+    # Draw bracket for cross-gen below decoding bracket
+    xgen_bracket_base = top_margin - bracket_spacing - bracket_arm_height
+    xgen_bracket_height = xgen_bracket_base + bracket_arm_height
+    xgen_bracket_center = (x_data[0] + x_data[-1]) / 2
+
+    # Vertical arms
+    ax.plot([x_data[0], x_data[0]], [xgen_bracket_base, xgen_bracket_height],
+            color='grey', linewidth=1)
+    ax.plot([x_data[-1], x_data[-1]], [xgen_bracket_base, xgen_bracket_height],
+            color='grey', linewidth=1)
+    # Horizontal top - left side
+    ax.plot([x_data[0], xgen_bracket_center - gap_size/2], [xgen_bracket_height, xgen_bracket_height],
+            color='grey', linewidth=1)
+    # Horizontal top - right side
+    ax.plot([xgen_bracket_center + gap_size/2, x_data[-1]], [xgen_bracket_height, xgen_bracket_height],
+            color='grey', linewidth=1)
+    # Stars in the gap
+    ax.text(xgen_bracket_center, xgen_bracket_height,
+            p_into_stars(p_value_xgen),
+            fontsize=10, color='grey', ha='center', va='center')
+
+    # # --- Decoding vs Cross-gen comparison with vertical bracket ---
+    # p_value_diff, diff_obs, diff_null = compute_learning_effect_pvalue(
+    #     dec_score, dec_score_ler_null, two_tailed=False
+    # )
+    #
+    # # Draw vertical bracket to the right of final stage points
+    # bracket_x = x_data[-1] + 0.3  # offset to the right
+    #
+    # # Use means across all stages for bracket endpoints
+    # bracket_y1 = dec_score[1, :].mean()  # cross-gen mean across all stages
+    # bracket_y2 = dec_score[0, :].mean()  # decoding mean across all stages
+    #
+    # # Calculate bracket center and scaled length
+    # bracket_center = (bracket_y1 + bracket_y2) / 2
+    # bracket_half_length = (bracket_y2 - bracket_y1) / 2 * vertical_bracket_scale
+    # bracket_y1_scaled = bracket_center - bracket_half_length
+    # bracket_y2_scaled = bracket_center + bracket_half_length
+    #
+    # # Horizontal lines extending from bracket (not touching points)
+    # ax.plot([bracket_x - 0.1, bracket_x], [bracket_y1_scaled, bracket_y1_scaled],
+    #         'k-', linewidth=1)
+    # ax.plot([bracket_x - 0.1, bracket_x], [bracket_y2_scaled, bracket_y2_scaled],
+    #         'k-', linewidth=1)
+    # # Vertical bracket line
+    # ax.plot([bracket_x, bracket_x], [bracket_y1_scaled, bracket_y2_scaled],
+    #         'k-', linewidth=1)
+    #
+    # # Stars in vertical orientation aligned with bracket
+    # ax.text(bracket_x + 0.02, bracket_center,
+    #         p_into_stars(p_value_diff),
+    #         fontsize=10, ha='left', va='center', rotation=90)
+
+    # --- null band for within condition ---
     if null_within is not None:
+        rand_null = np.asarray(null_within).flatten()
 
-        rand_null = null_within.flatten()
+        # mean of the null distribution
         dec_mean = rand_null.mean()
-        dec_std = rand_null.std()
-        # ax.axhline(dec_mean, linestyle='-', linewidth=1, color=col_chance)
-        ax.axhline(dec_mean + 3 * dec_std, linestyle='--', linewidth=1, color='dimgrey', zorder=-7+1)
-        ax.axhline(dec_mean - 3 * dec_std, linestyle='--', linewidth=1, color='dimgrey', zorder=-7+1)
-        rect = patches.Rectangle((-0.4, dec_mean - 3 * dec_std), 10, 6 * dec_std, edgecolor=None, facecolor='lightgrey',
-                                 zorder=-8+1)
+
+        # center null around its mean
+        null_centered = rand_null - dec_mean
+
+        # critical absolute distance from the mean for a two-sided alpha
+        crit = np.quantile(np.abs(null_centered), 1 - alpha)
+
+        lower = dec_mean - crit
+        upper = dec_mean + crit
+
+        # mean line
+        ax.axhline(dec_mean, linestyle='--', linewidth=1,
+                   color='black', zorder=-6)
+
+        # central NON-rejection region (grey band)
+        rect = patches.Rectangle(
+            (-0.4, lower),  # x0, y0
+            10,  # width across x (adjust if needed)
+            upper - lower,  # height in y
+            edgecolor=None,
+            facecolor='lightgrey',
+            zorder=-7
+        )
         ax.add_patch(rect)
 
     else:
-        ax.axhline(0.5, color='black', linestyle='--', zorder=-5, linewidth=0.8)
+        # fallback: simple chance line
+        ax.axhline(0.5, color='black', linestyle='--',
+                   zorder=-5, linewidth=0.8)
 
     return
-
 
 def get_sep_tasksets(data_eq, labels_eq):
     idc_half = int(labels_eq[0].shape[-1] / 2)
@@ -5021,7 +5350,7 @@ def run_time_resolved_dec_exp2(data, labels, if_save=True, fname='exp2_dec_time'
     shape = np.array(config['ENCODING_EXP2']['shape'])
     width = np.array(config['ENCODING_EXP2']['width'])
     xor = np.array(config['ENCODING_EXP2']['xor'])
-
+    xor2 = np.array(config['ENCODING_EXP2']['xor2'])
     data_eq, labels_eq = split_data_stages_moveavg(data, labels, n_stages=config['ANALYSIS_PARAMS']['N_STAGES'],
                                                    n_windows=config['ANALYSIS_PARAMS']['N_WINDOWS'], trl_min=49)
     data_eq = [data_eq[0], data_eq[-1]]
@@ -5037,7 +5366,7 @@ def run_time_resolved_dec_exp2(data, labels, if_save=True, fname='exp2_dec_time'
                 time_sliding = [i_time, i_time + 1]
                 print('Time point: ', i_time + 1, ' of ', data_eq[0].shape[-1] - 50)
                 dec_rnd_time.append(run_decoding_shape_locked(data_epochs1and4, labels_epochs1and4, time_window=time_sliding,
-                                              factors=[context, taskset, shape, width, xor]))
+                                              factors=[context, taskset, shape, width, xor, xor2]))
             dec_rnd_time = np.array(dec_rnd_time)
             dec_rnd_time_all.append(dec_rnd_time)
         dec_rnd_time_all = np.array(dec_rnd_time_all)
@@ -5057,7 +5386,7 @@ def run_time_resolved_dec_exp2(data, labels, if_save=True, fname='exp2_dec_time'
             time_sliding = [i_time, i_time + 1]
             print('Time point: ', i_time + 1, ' of ', data_eq[0].shape[-1] - 50)
             dec_time.append(run_decoding_shape_locked(data_eq, labels_eq, time_window=time_sliding,
-                                                      factors=[context, taskset, shape, width, xor]))
+                                                      factors=[context, taskset, shape, width, xor, xor2]))
         dec_time = np.array(dec_time)
 
         if if_save:
@@ -5181,7 +5510,6 @@ def compute_lr_null_cos_sim(tasks, reps=500):
     n_cells = n_cells_1 + n_cells_2
 
     cos_sim_rnd = np.zeros((reps, 2, tasks[0].shape[-1]))
-    print('Compute learning null for cos. similarity analysis')
     for i_rep in range(reps):
         cell_idc = np.arange(n_cells)
         np.random.shuffle(cell_idc)
@@ -5195,7 +5523,8 @@ def compute_lr_null_cos_sim(tasks, reps=500):
     return cos_sim_rnd
 
 
-def plot_cos_sim(gs, fig, obs, ler_rnd, rnd_null, title, y_lim, tail='two'):
+def plot_cos_sim(gs, fig, obs, ler_rnd, rnd_null, title, y_lim, tail='two',
+                 bracket_arm_length=0.05, bracket_height_offset=0.1):
     ax = fig.add_subplot(gs)
     x_data = list(range(1, obs.shape[0] + 1))
     ax.plot(x_data, obs, color='black', zorder=5)
@@ -5203,7 +5532,8 @@ def plot_cos_sim(gs, fig, obs, ler_rnd, rnd_null, title, y_lim, tail='two'):
 
     ax.set_xticks(x_data)
     ax.set_xticklabels(x_data)
-    plt.margins(x=0.1)
+    ax.set_xlim([x_data[0] - 0.5, x_data[-1] + 0.5])
+
     sns.despine(right=True, top=True)
     ax.set_ylabel('Pearson r')
     ax.set_xlabel('learning stage')
@@ -5211,20 +5541,46 @@ def plot_cos_sim(gs, fig, obs, ler_rnd, rnd_null, title, y_lim, tail='two'):
     ax.set_title(title)
     ax.axhline(0, color='black', linewidth=0.8, linestyle='--')
 
-    p_value = compute_p_value(obs[-1], obs[0], ler_rnd[:, -1], ler_rnd[:, 0], tail=tail)
-    ax.text(2.5, 0.55, p_into_stars(p_value), fontsize=10, color='black', ha='center', va='center')
+    # Calculate bracket positioning with constant parameters
+    obs_max = obs.max()
+    bracket_base = obs_max + bracket_height_offset
+    bracket_height = bracket_base + bracket_arm_length
 
+    # --- Bracket for stage 1 vs stage 4 comparison ---
+    p_value = compute_p_value(obs[-1], obs[0], ler_rnd[:, -1], ler_rnd[:, 0], tail=tail)
+
+    # Draw bracket with gap in the middle for stars
+    bracket_center = (x_data[0] + x_data[-1]) / 2
+    gap_size = 0.8  # Size of gap for stars
+
+    # Vertical arms
+    ax.plot([x_data[0], x_data[0]], [bracket_base, bracket_height],
+            color='black', linewidth=1)
+    ax.plot([x_data[-1], x_data[-1]], [bracket_base, bracket_height],
+            color='black', linewidth=1)
+    # Horizontal top - left side
+    ax.plot([x_data[0], bracket_center - gap_size / 2], [bracket_height, bracket_height],
+            color='black', linewidth=1)
+    # Horizontal top - right side
+    ax.plot([bracket_center + gap_size / 2, x_data[-1]], [bracket_height, bracket_height],
+            color='black', linewidth=1)
+
+    # Stars in the gap
+    ax.text(bracket_center, bracket_height,
+            p_into_stars(p_value),
+            fontsize=10, color='black', ha='center', va='center')
+
+    # Null distribution band (now clipped to visible x range)
     rand_null = rnd_null.flatten()
     dec_mean = rand_null.mean()
     dec_std = rand_null.std()
-    # ax.axhline(dec_mean, linestyle='-', linewidth=1, color=col_chance)
-    # ax.axhline(dec_mean + 2 * dec_std, linestyle='--', linewidth=1, color='grey')
-    # ax.axhline(dec_mean - 2 * dec_std, linestyle='--', linewidth=1, color='grey')
-    rect = patches.Rectangle((-0.4, dec_mean - 2 * dec_std), 5.5, 4 * dec_std, edgecolor=None, facecolor='lightgrey',
-                             zorder=-8)
+    rect = patches.Rectangle((x_data[0] - 0.5, dec_mean - 2 * dec_std),
+                             x_data[-1] - x_data[0] + 1, 4 * dec_std,
+                             edgecolor=None, facecolor='lightgrey', zorder=-8)
     ax.add_patch(rect)
 
-def plot_data_comparison(gs, fig, group1, group2, title=None, ylim=None):
+
+def plot_data_comparison(gs, fig, group1, group2, title=None, ylim=None, y_axis='no reward/reward\nproporiton', labels_ticks=['set 1', 'set 2'], baseline_val=1):
     """
     Plots two groups of data using boxplots and scatter plots for direct comparison.
 
@@ -5248,11 +5604,11 @@ def plot_data_comparison(gs, fig, group1, group2, title=None, ylim=None):
 
     # Set plot details
     ax.set_xticks([1, 2])
-    ax.set_xticklabels(['set 1', 'set 2'])
-    ax.set_ylabel('no reward/reward\nproporiton')
+    ax.set_xticklabels(labels_ticks)
+    ax.set_ylabel(y_axis)
     ax.set_title(title)
     sns.despine(top=True, right=True)
-    ax.axhline(1, color='black', linewidth=0.8, linestyle='--')
+    ax.axhline(baseline_val, color='black', linewidth=0.8, linestyle='--')
     ax.set_ylim(ylim)
 
     from scipy.stats import ttest_ind, permutation_test
@@ -5268,8 +5624,8 @@ def plot_data_comparison(gs, fig, group1, group2, title=None, ylim=None):
     p_val = res.pvalue
     # plot p-value
     ax.text(1.5, 3.5, p_into_stars(p_val), fontsize=12, ha='center')
-    print('ATT facilitation effect p-value ', str(round(p_val,3)))
-
+    print('******* Trial termination facilitation effect *******')
+    print('     Stats: M1 = ', str(round(np.mean(group1), 3)), ', M2 = ', str(round(np.mean(group2), 3)), ' | p-value = ', str(round(p_val, 3)))
 def run_decoding_width_locked_exp1(data_wins, labels_wins, time_window, factors):
     with open('config.yml') as file:
         config = yaml.full_load(file)
@@ -5311,3 +5667,1460 @@ def correct_labels_for_cross_gen(labels):
             labels_sessions_new.append(labels_sess)
         labels_stages_new.append(labels_sessions_new)
     return labels_stages_new
+
+
+
+def compute_cross_correlation(signal1, signal2, sampling_rate=1.0, max_lag_seconds=None):
+    """
+    Compute the cross-correlation between two signals and estimate the lag.
+
+    Parameters:
+    -----------
+    signal1, signal2 : array-like
+        The two signals to compute cross-correlation between
+    sampling_rate : float
+        Sampling rate of the signals in Hz
+    max_lag_seconds : float or None
+        Maximum lag to consider in seconds. If None, use the entire signal length
+
+    Returns:
+    --------
+    lags : array
+        Lag values in seconds
+    cross_corr : array
+        Cross-correlation values
+    max_lag : float
+        Lag with maximum correlation in seconds
+    max_corr : float
+        Maximum correlation value
+    """
+    # Ensure signals are numpy arrays and the same length
+    signal1 = np.array(signal1)
+    signal2 = np.array(signal2)
+
+    # Mean center and normalize the signals
+    s1_norm = (signal1 - np.mean(signal1)) / (np.std(signal1) * len(signal1))
+    s2_norm = (signal2 - np.mean(signal2)) / np.std(signal2)
+
+    # Compute cross-correlation
+    cross_corr = signal.correlate(s1_norm, s2_norm, mode='full')
+
+    # Calculate lag values
+    lags = np.arange(-len(signal2) + 1, len(signal1))
+    lags_seconds = lags / sampling_rate
+
+    # Limit to max_lag_seconds if specified
+    if max_lag_seconds is not None:
+        max_lag_samples = int(max_lag_seconds * sampling_rate)
+        mid_point = len(lags) // 2
+        start_idx = max(0, mid_point - max_lag_samples)
+        end_idx = min(len(lags), mid_point + max_lag_samples + 1)
+        lags_seconds = lags_seconds[start_idx:end_idx]
+        cross_corr = cross_corr[start_idx:end_idx]
+
+    # Find the lag with maximum correlation
+    max_idx = np.argmax(np.abs(cross_corr))
+    max_lag = lags_seconds[max_idx]
+    max_corr = cross_corr[max_idx]
+
+    return lags_seconds, cross_corr, max_lag, max_corr
+
+
+def plot_cross_correlation(signal1, signal2, title1="Signal 1", title2="Signal 2",
+                           sampling_rate=.1, max_lag_seconds=None, time_unit="s"):
+    """
+    Compute and plot the cross-correlation between two signals.
+
+    Parameters:
+    -----------
+    signal1, signal2 : array-like
+        The two signals to compute cross-correlation between
+    title1, title2 : str
+        Titles for the two signals
+    sampling_rate : float
+        Sampling rate of the signals in Hz
+    max_lag_seconds : float or None
+        Maximum lag to consider in seconds
+    time_unit : str
+        Unit for time axis (e.g., "s" for seconds, "ms" for milliseconds)
+    """
+    # Create time arrays for plotting
+    t = np.arange(len(signal1)) / sampling_rate
+
+    # Compute cross-correlation
+    lags, cross_corr, max_lag, max_corr = compute_cross_correlation(
+        signal1, signal2, sampling_rate, max_lag_seconds
+    )
+
+    # Create the figure
+    fig, axes = plt.subplots(3, 1, figsize=(10, 8))
+
+    # Plot the two signals
+    axes[0].plot(t, signal1)
+    axes[0].set_title(f"{title1}")
+    axes[0].set_xlabel(f"Time ({time_unit})")
+    axes[0].set_ylabel("Amplitude")
+
+    axes[1].plot(t, signal2)
+    axes[1].set_title(f"{title2}")
+    axes[1].set_xlabel(f"Time ({time_unit})")
+    axes[1].set_ylabel("Amplitude")
+
+    # Plot the cross-correlation
+    axes[2].plot(lags, cross_corr)
+    axes[2].axvline(x=max_lag, color='r', linestyle='--')
+    axes[2].set_title(f"Cross-correlation (Max at lag: {max_lag:.3f} {time_unit}, Correlation: {max_corr:.3f})")
+    axes[2].set_xlabel(f"Lag ({time_unit})")
+    axes[2].set_ylabel("Cross-correlation")
+
+    # Highlight the maximum correlation
+    axes[2].plot(max_lag, max_corr, 'ro')
+
+    plt.tight_layout()
+    return fig, axes, (max_lag, max_corr)
+
+
+def get_betas_cross_val_exp2(data, labels, condition_labels, normalisation='zscore', time_window=[140, 150],
+                          ):
+    n_parts = len(data)
+
+    betas_part = []
+    for p in range(n_parts):
+
+        betas = []
+        for s in range(len(data[p])):
+
+            firing_rates_ses = data[p][s]
+            firing_rates_ses = firing_rates_ses[:, :, time_window[0]:time_window[1]]
+            labels_ses = labels[p][s]
+
+
+
+            firing_mean = np.mean(firing_rates_ses, axis=-1, keepdims=True)
+            labels_ses_split = labels_ses
+
+
+            if normalisation == 'zscore':
+                firing_mean = (firing_mean - np.mean(firing_mean, axis=0, keepdims=True)) / (
+                    np.std(firing_mean, axis=0,
+                           keepdims=True))
+
+            elif normalisation == 'mean_centred':
+                firing_mean = firing_mean - np.mean(firing_mean, axis=0, keepdims=True)
+
+            elif normalisation == 'none':
+                firing_mean = firing_mean
+
+            elif normalisation == 'soft':
+                firing_mean = firing_mean / (
+                        (np.max(firing_mean, axis=0, keepdims=True) - np.min(firing_mean, axis=0,
+
+                                                                             keepdims=True)) + 5)
+
+            labels_context = np.array(assign_lables(labels_ses_split, condition_labels[0]))
+            labels_set = np.array(assign_lables(labels_ses_split, condition_labels[1]))
+            labels_int = np.array(assign_lables(labels_ses_split, np.array(condition_labels[0])*np.array(condition_labels[1])))
+            constant = np.ones_like(labels_context).astype(float)
+            design_matrix = np.vstack([constant, labels_set, labels_int, labels_context]).T
+            design_matrix = design_matrix.astype(float)
+
+            n_neurons = firing_mean.shape[1]
+            n_times = firing_mean.shape[-1]
+            n_models = design_matrix.shape[1]
+
+            design_matrix_stacked = np.concatenate([design_matrix] * n_times, axis=0)
+            firing_rates_ses_stacked = np.concatenate(np.array_split(firing_mean, n_times, axis=-1), axis=0)
+
+            betas_ses = np.zeros((n_neurons, n_models, 1))
+            for cell in range(n_neurons):
+                betas_ses[cell, :, :] = \
+                    sp.linalg.lstsq(design_matrix_stacked, firing_rates_ses_stacked[:, cell, :])[0][:, :]
+
+
+            betas.append(np.array(betas_ses)[:, :, 0])
+        betas_part.append(betas)
+
+    epochs_sel = []
+    for p in range(n_parts):
+        epoch = np.concatenate(betas_part[p], axis=0)[:, 1:].T
+        epoch -= np.mean(epoch, axis=1, keepdims=True)
+        epoch = epoch.T
+        epoch_con = np.array([epoch, epoch]).transpose((1, 2, 0))
+        epochs_sel.append(epoch_con)
+
+    return epochs_sel
+
+
+
+def extract_fixerr_types_and_trl_types(beh):
+    with open('config.yml') as file:
+        config = yaml.full_load(file)
+
+
+    code_labels = config['TRIGGER_CODES']
+    codes = beh['uecode']
+    codes = list(codes[0, :])
+    times = beh['timingms']
+    times = list(times[0, :])
+
+    size = len(codes)
+    idx_list = [idx for idx, val in
+                enumerate(codes) if val == 6116]
+
+    trials = [codes[i: j] for i, j in
+              zip([0] + idx_list, idx_list +
+                  ([size] if idx_list[-1] != size else []))]
+
+    trials = trials[1:]
+
+    fixerr_types = []
+    for _ in range(len(trials)):
+
+        if code_labels['CUE1_ON'] in trials[_] and code_labels['TARGET1_ON'] in trials[_] and (
+                code_labels['BREAK_TARGET_ERROR'] in trials[_]):
+            fixerr_types.append(3)
+        elif code_labels['CUE1_ON'] in trials[_] and code_labels['TARGET2_ON'] in trials[_] and (
+                code_labels['BREAK_TARGET_ERROR'] in trials[_]):
+            fixerr_types.append(3)
+        elif code_labels['CUE1_ON'] in trials[_] and code_labels['TARGET3_ON'] in trials[_] and (
+                code_labels['BREAK_TARGET_ERROR'] in trials[_]):
+            fixerr_types.append(3)
+        elif code_labels['CUE1_ON'] in trials[_] and code_labels['TARGET4_ON'] in trials[_] and (
+                code_labels['BREAK_TARGET_ERROR'] in trials[_]):
+            fixerr_types.append(3)
+        elif code_labels['CUE2_ON'] in trials[_] and code_labels['TARGET1_ON'] in trials[_] and (
+                code_labels['BREAK_TARGET_ERROR'] in trials[_]):
+            fixerr_types.append(3)
+        elif code_labels['CUE2_ON'] in trials[_] and code_labels['TARGET2_ON'] in trials[_] and (
+                code_labels['BREAK_TARGET_ERROR'] in trials[_]):
+            fixerr_types.append(3)
+        elif code_labels['CUE2_ON'] in trials[_] and code_labels['TARGET3_ON'] in trials[_] and (
+                code_labels['BREAK_TARGET_ERROR'] in trials[_]):
+            fixerr_types.append(3)
+        elif code_labels['CUE2_ON'] in trials[_] and code_labels['TARGET4_ON'] in trials[_] and (
+                code_labels['BREAK_TARGET_ERROR'] in trials[_]):
+            fixerr_types.append(3)
+
+        elif code_labels['CUE3_ON'] in trials[_] and code_labels['TARGET1_ON'] in trials[_] and (
+                code_labels['BREAK_TARGET_ERROR'] in trials[_]):
+            fixerr_types.append(3)
+        elif code_labels['CUE3_ON'] in trials[_] and code_labels['TARGET2_ON'] in trials[_] and (
+                code_labels['BREAK_TARGET_ERROR'] in trials[_]):
+            fixerr_types.append(3)
+        elif code_labels['CUE3_ON'] in trials[_] and code_labels['TARGET3_ON'] in trials[_] and (
+                code_labels['BREAK_TARGET_ERROR'] in trials[_]):
+            fixerr_types.append(3)
+        elif code_labels['CUE3_ON'] in trials[_] and code_labels['TARGET4_ON'] in trials[_] and (
+                code_labels['BREAK_TARGET_ERROR'] in trials[_]):
+            fixerr_types.append(3)
+        elif code_labels['CUE4_ON'] in trials[_] and code_labels['TARGET1_ON'] in trials[_] and (
+                code_labels['BREAK_TARGET_ERROR'] in trials[_]):
+            fixerr_types.append(3)
+        elif code_labels['CUE4_ON'] in trials[_] and code_labels['TARGET2_ON'] in trials[_] and (
+                code_labels['BREAK_TARGET_ERROR'] in trials[_]):
+            fixerr_types.append(3)
+        elif code_labels['CUE4_ON'] in trials[_] and code_labels['TARGET3_ON'] in trials[_] and (
+                code_labels['BREAK_TARGET_ERROR'] in trials[_]):
+            fixerr_types.append(3)
+        elif code_labels['CUE4_ON'] in trials[_] and code_labels['TARGET4_ON'] in trials[_] and (
+                code_labels['BREAK_TARGET_ERROR'] in trials[_]):
+            fixerr_types.append(3)
+        elif code_labels['BREAK_CUE_ERROR'] in trials[_]:
+            fixerr_types.append(2)  # fixation break during the cue
+        elif code_labels['FIXATION_ERROR'] in trials[_]:
+            fixerr_types.append(1)  # early fixation error (before the colour was presented)
+        elif code_labels['BREAK_ERROR'] in trials[_] and not (code_labels['REWARD_ON'] in trials[_]) and not (
+                code_labels['CUE_OFF'] in trials[_]):
+            fixerr_types.append(1)  # early fixation error (before the colour was presented)
+        else:
+            fixerr_types.append(0)  # trials without any fixation error
+
+    trial_types = []
+    for _ in range(len(trials)):
+
+        if code_labels['CUE1_ON'] in trials[_] and code_labels['TARGET1_ON'] in trials[_]:
+            trial_types.append(1)
+        elif code_labels['CUE1_ON'] in trials[_] and code_labels['TARGET2_ON'] in trials[_]:
+            trial_types.append(2)
+        elif code_labels['CUE1_ON'] in trials[_] and code_labels['TARGET3_ON'] in trials[_]:
+            trial_types.append(3)
+        elif code_labels['CUE1_ON'] in trials[_] and code_labels['TARGET4_ON'] in trials[_]:
+            trial_types.append(4)
+        elif code_labels['CUE2_ON'] in trials[_] and code_labels['TARGET1_ON'] in trials[_]:
+            trial_types.append(5)
+        elif code_labels['CUE2_ON'] in trials[_] and code_labels['TARGET2_ON'] in trials[_]:
+            trial_types.append(6)
+        elif code_labels['CUE2_ON'] in trials[_] and code_labels['TARGET3_ON'] in trials[_]:
+            trial_types.append(7)
+        elif code_labels['CUE2_ON'] in trials[_] and code_labels['TARGET4_ON'] in trials[_]:
+            trial_types.append(8)
+
+        elif code_labels['CUE3_ON'] in trials[_] and code_labels['TARGET1_ON'] in trials[_] and not (
+                code_labels['BREAK_TARGET_ERROR'] in trials[_]):
+            trial_types.append(9)
+        elif code_labels['CUE3_ON'] in trials[_] and code_labels['TARGET2_ON'] in trials[_] and not (
+                code_labels['BREAK_TARGET_ERROR'] in trials[_]):
+            trial_types.append(10)
+        elif code_labels['CUE3_ON'] in trials[_] and code_labels['TARGET3_ON'] in trials[_] and not (
+                code_labels['BREAK_TARGET_ERROR'] in trials[_]):
+            trial_types.append(11)
+        elif code_labels['CUE3_ON'] in trials[_] and code_labels['TARGET4_ON'] in trials[_] and not (
+                code_labels['BREAK_TARGET_ERROR'] in trials[_]):
+            trial_types.append(12)
+        elif code_labels['CUE4_ON'] in trials[_] and code_labels['TARGET1_ON'] in trials[_] and not (
+                code_labels['BREAK_TARGET_ERROR'] in trials[_]):
+            trial_types.append(13)
+        elif code_labels['CUE4_ON'] in trials[_] and code_labels['TARGET2_ON'] in trials[_] and not (
+                code_labels['BREAK_TARGET_ERROR'] in trials[_]):
+            trial_types.append(14)
+        elif code_labels['CUE4_ON'] in trials[_] and code_labels['TARGET3_ON'] in trials[_]:
+            trial_types.append(15)
+        elif code_labels['CUE4_ON'] in trials[_] and code_labels['TARGET4_ON'] in trials[_]:
+            trial_types.append(16)
+
+        else:
+            trial_types.append(0)
+
+        fixeer_type_map = {0: 'no fix. error', 1: 'early fixation error', 2: 'cue fix. error', 3: 'target fix. error'}
+
+    return np.array(fixerr_types), np.array(trial_types), fixeer_type_map
+
+
+def extract_switch_types(trial_types):
+    color_switch = [0]  # 0==invalid, 1==stay, 2==switch
+    for trial_idx in range(len(trial_types) - 1):
+        if trial_types[trial_idx] == 0:
+            color_switch.append(0)
+
+        elif trial_types[trial_idx] in [1, 2, 3, 4] and trial_types[trial_idx + 1] in [1, 2, 3, 4]:  # stay colour 1
+            color_switch.append(1)
+
+        elif trial_types[trial_idx] in [5, 6, 7, 8] and trial_types[trial_idx + 1] in [5, 6, 7, 8]:  # stay colour 2
+            color_switch.append(1)
+
+        elif trial_types[trial_idx] in [1, 2, 3, 4] and trial_types[trial_idx + 1] in [5, 6, 7,
+                                                                                       8]:  # switch from colour 1 to colour 2
+            color_switch.append(2)
+
+        elif trial_types[trial_idx] in [5, 6, 7, 8] and trial_types[trial_idx + 1] in [1, 2, 3,
+                                                                                       4]:  # switch from colour 2 to colour 1
+            color_switch.append(2)
+
+        elif trial_types[trial_idx + 1] == 0:
+            color_switch.append(0)
+
+    shape_switch = [0]
+    for trial_idx in range(len(trial_types) - 1):
+        if trial_types[trial_idx] == 0:
+            shape_switch.append(0)
+
+
+        elif trial_types[trial_idx] in [1, 2, 5, 6] and trial_types[trial_idx + 1] in [1, 2, 5, 6]:  # stay shape 1
+            shape_switch.append(1)
+
+        elif trial_types[trial_idx] in [3, 4, 7, 8] and trial_types[trial_idx + 1] in [3, 4, 7, 8]:  # stay shape 2
+            shape_switch.append(1)
+
+
+        elif trial_types[trial_idx] in [1, 2, 5, 6] and trial_types[trial_idx + 1] in [3, 4, 7,
+                                                                                       8]:  # switch from shape 1 to shape 2
+            shape_switch.append(2)
+
+        elif trial_types[trial_idx] in [3, 4, 7, 8] and trial_types[trial_idx + 1] in [1, 2, 5,
+                                                                                       6]:  # switch from shape 2 to shape 1
+            shape_switch.append(2)
+
+
+        elif trial_types[trial_idx + 1] == 0:
+            shape_switch.append(0)
+
+    width_switch = [0]
+    for trial_idx in range(len(trial_types) - 1):
+        if trial_types[trial_idx] == 0:
+            width_switch.append(0)
+
+        elif trial_types[trial_idx] in [1, 3, 5, 7] and trial_types[trial_idx + 1] in [1, 3, 5, 7]:
+            width_switch.append(1)
+
+        elif trial_types[trial_idx] in [2, 4, 6, 8] and trial_types[trial_idx + 1] in [2, 4, 6, 8]:
+            width_switch.append(1)
+
+
+        elif trial_types[trial_idx] in [1, 3, 5, 7] and trial_types[trial_idx + 1] in [2, 4, 6, 8]:
+            width_switch.append(2)
+
+        elif trial_types[trial_idx] in [2, 4, 6, 8] and trial_types[trial_idx + 1] in [1, 3, 5, 7]:
+            width_switch.append(2)
+
+
+        elif trial_types[trial_idx + 1] == 0:
+            width_switch.append(0)
+
+    switch_mapping = {0: 'invalid', 1: 'stay', 2: 'switch'}
+
+    return np.array(color_switch), np.array(shape_switch), np.array(width_switch), switch_mapping
+
+
+def extract_switch_costs(trial_types, fixerr_types, color_switch, shape_switch, width_switch):
+    with open('config.yml') as file:
+        config = yaml.full_load(file)
+
+    # get rid of early fix breaks
+    trial_types_filtered = trial_types[fixerr_types == 3]
+    color_switch_filtered = color_switch[fixerr_types == 3]
+    shape_switch_filtered = shape_switch[fixerr_types == 3]
+    width_switch_filtered = width_switch[fixerr_types == 3]
+
+    rewarded_trials = assign_lables(trial_types_filtered, factor=np.array(config['ENCODING_EXP1']['xor']))
+    rewarded_trials = np.array(rewarded_trials)
+    no_rew_idc = rewarded_trials == 0
+
+    color_switch_norew = color_switch_filtered[no_rew_idc]
+    n_colour_switches_norew = sum(color_switch_norew == 2) #/ len(color_switch_norew)
+    n_colour_stays_norew = sum(color_switch_norew == 1) #/ len(color_switch_norew)
+
+
+    shape_switch_norew = shape_switch_filtered[no_rew_idc]
+    n_shape_switches_norew = sum(shape_switch_norew == 2) #/ len(shape_switch_norew)
+    n_shape_stays_norew = sum(shape_switch_norew == 1) #/ len(shape_switch_norew)
+
+    width_switch_norew = width_switch_filtered[no_rew_idc]
+    n_width_switches_norew = sum(width_switch_norew == 2) #/ len(width_switch_norew)
+    n_width_stays_norew = sum(width_switch_norew == 1) #/ len(width_switch_norew)
+
+    rew_idc = rewarded_trials == 1
+    color_switch_rew = color_switch_filtered[rew_idc]
+    n_colour_switches_rew = sum(color_switch_rew == 2) #/ len(color_switch_rew)
+    n_colour_stays_rew = sum(color_switch_rew == 1) #/ len(color_switch_rew)
+
+    shape_switch_rew = shape_switch_filtered[rew_idc]
+    n_shape_switches_rew = sum(shape_switch_rew == 2) #/ len(shape_switch_rew)
+    n_shape_stays_rew = sum(shape_switch_rew == 1) #/ len(shape_switch_rew)
+
+    width_switch_rew = width_switch_filtered[rew_idc]
+    n_width_switches_rew = sum(width_switch_rew == 2) #/ len(width_switch_rew)
+    n_width_stays_rew = sum(width_switch_rew == 1) #/ len(width_switch_rew)
+
+    colour_switch = n_colour_switches_norew/n_colour_switches_rew
+    colour_stay = n_colour_stays_norew/n_colour_stays_rew
+    shape_switch = n_shape_switches_norew/n_shape_switches_rew
+    shape_stay = n_shape_stays_norew/n_shape_stays_rew
+    width_switch = n_width_switches_norew/n_width_switches_rew
+    width_stay = n_width_stays_norew/n_width_stays_rew
+
+
+
+    return np.array([colour_switch, colour_stay, shape_switch, shape_stay, width_switch, width_stay])
+
+def get_switch_costs(sessions_stages):
+    with open('config.yml') as file:
+        config = yaml.full_load(file)
+
+    switch_costs_stages = []
+    switch_costs_cxt_stages = []
+    for n_stage in range(len(sessions_stages)):
+        sessions = sessions_stages[n_stage]
+        switch_costs_sessions = []
+        switch_costs_cxt_sessions = []
+        for s in range(len(sessions)):
+            print('Session: ', s + 1)
+            beh = io.loadmat(config['PATHS']['in_template_beh'].format(sessions[s]))
+            fixerr_types, trial_types, fixeer_type_map = extract_fixerr_types_and_trl_types(beh)
+            color_switch, shape_switch, width_switch, switch_mapping = extract_switch_types(trial_types)
+            switch_costs_all = np.array([extract_switch_costs(trial_types, fixerr_types, color_switch, shape_switch, width_switch)])
+            switch_costs_context = (switch_costs_all[0, 1] - switch_costs_all[0, 0]) - (switch_costs_all[0, 3] - switch_costs_all[0, 2])
+            switch_costs_sessions.append(switch_costs_all)
+            switch_costs_cxt_sessions.append(switch_costs_context)
+        switch_costs_stages.append(switch_costs_sessions)
+        switch_costs_cxt_stages.append(switch_costs_cxt_sessions)
+
+    means = []
+    for _ in range(len(switch_costs_stages)):
+        means.append(np.array(switch_costs_stages[_]))
+
+    n_stages = len(sessions_stages)
+    stages_hier_swith = []
+    stages_colour_switch = []
+    stages_shape_switch = []
+    for i_stage in range(n_stages):
+        stages_hier_swith.append((means[i_stage][:, 0, 2] - means[i_stage][:, 0, 3]) - (means[i_stage][:, 0, 0] - means[i_stage][:, 0, 1]))
+        stages_colour_switch.append((means[i_stage][:, 0, 1] - means[i_stage][:, 0, 0]))
+        stages_shape_switch.append((means[i_stage][:, 0, 3] - means[i_stage][:, 0, 2]))
+
+    return stages_colour_switch, stages_shape_switch, stages_hier_swith
+
+
+
+def temp_dec_stages_permutation(data_eq, labels_eq, variable_mapping, tranc_window=[40, 160], n_permutations=100,
+                                random_state=42, method="Pearson"):
+    """
+    Compute temporal generalization matrices with original and scrambled labels.
+    Uses the same permuted labels across all windows for each permutation.
+
+    Parameters:
+    -----------
+    data_eq : list of ndarrays
+        List of data arrays for each stage
+    labels_eq : list of ndarrays
+        List of label arrays for each stage
+    variable_mapping : list or array
+        Mapping of labels to factors
+    tranc_window : list
+        Time window to analyze [start, end]
+    n_permutations : int
+        Number of permutation iterations to perform
+    random_state : int
+        Random seed for reproducibility
+
+    Returns:
+    --------
+    decoding : ndarray
+        Original temporal generalization matrices
+    decoding_perm : ndarray
+        Permuted temporal generalization matrices
+    """
+    n_windows = data_eq[0].shape[0]
+    n_stages = len(data_eq)
+    window_size = tranc_window[1] - tranc_window[0] + 1
+    rng = np.random.RandomState(random_state)
+
+    # Initialize arrays for original and permuted decoding
+    decoding = np.zeros((n_stages, n_windows, window_size, window_size))
+    decoding_perm = np.zeros((n_permutations, n_stages, n_windows, window_size, window_size))
+
+    # Convert mapping to numpy array if it's not already
+    colour_fac = np.array(variable_mapping)
+
+    # Compute original decoding matrices first
+    for i_stage in range(n_stages):
+        y_stage = labels_eq[i_stage][0, :]
+        for i_window in range(n_windows):
+
+            # Extract data for this stage and window
+            X_stage = data_eq[i_stage][i_window, :, :, tranc_window[0]:tranc_window[1] + 1]
+
+
+            # Compute original labels
+            y_colour = np.array(assign_lables(y_stage, colour_fac))
+
+            if method == "SVM":
+                decoding[i_stage, i_window, :, :] = decode_time(X_stage, y_colour, n_inter=1)
+            elif method == "Pearson":
+                decoder = NeuralCorrelationDecoder(across_time=True)
+                decoder.fit(X_stage, y_colour)
+                decoding[i_stage, i_window, :, :] = decoder.get_correlation()
+
+    print(f'Constructing null')
+    # Now compute permuted decoding matrices
+    for perm in tqdm(range(n_permutations)):
+        # For each stage, generate ONE permutation to use across all windows
+        for i_stage in range(n_stages):
+            # Get the first window's labels to determine permutation structure
+            y_stage_first = labels_eq[i_stage][0, :]
+            y_colour_first = np.array(assign_lables(y_stage_first, colour_fac))
+
+            # Create a single permutation for this stage
+            y_perm_indices = rng.permutation(len(y_colour_first))
+
+            # Use this permutation for all windows in this stage
+            for i_window in range(n_windows):
+                # Extract data for this stage and window
+                X_stage = data_eq[i_stage][i_window, :, :, tranc_window[0]:tranc_window[1] + 1]
+                y_stage = labels_eq[i_stage][i_window, :]
+
+                # Get original color labels
+                y_colour = np.array(assign_lables(y_stage, colour_fac))
+
+                # Apply the same permutation pattern to these labels
+                y_perm = y_colour[y_perm_indices]
+
+                # Compute decoding matrix with permuted labels
+
+
+                if method == "SVM":
+                    decoding_perm[perm, i_stage, i_window, :, :] = decode_time(X_stage, y_perm, n_inter=1)
+                elif method == "Pearson":
+                    decoder = NeuralCorrelationDecoder(across_time=True)
+                    decoder.fit(X_stage, y_perm)
+                    decoding_perm[perm, i_stage, i_window, :, :] = decoder.get_correlation()
+
+
+    return decoding, decoding_perm
+
+
+from sklearn.base import BaseEstimator, ClassifierMixin
+from sklearn.utils.validation import check_X_y, check_array, check_is_fitted
+from sklearn.utils.multiclass import unique_labels
+from scipy.stats import zscore
+from joblib import Parallel, delayed
+from numba import jit, prange
+import multiprocessing as mp
+
+@jit(nopython=True, parallel=True)
+def fast_pearsonr_matrix(X, Y):
+    """
+    Fast computation of Pearson correlation matrix using Numba.
+    X: (n_features, n_timepoints1)
+    Y: (n_features, n_timepoints2)
+    Returns: (n_timepoints1, n_timepoints2)
+    """
+    n_features, n_timepoints1 = X.shape
+    _, n_timepoints2 = Y.shape
+
+    corr_matrix = np.zeros((n_timepoints1, n_timepoints2))
+
+    for i in prange(n_timepoints1):
+        for j in prange(n_timepoints2):
+            x = X[:, i]
+            y = Y[:, j]
+
+            # Compute correlation manually for speed
+            x_mean = np.mean(x)
+            y_mean = np.mean(y)
+
+            num = np.sum((x - x_mean) * (y - y_mean))
+            den_x = np.sqrt(np.sum((x - x_mean) ** 2))
+            den_y = np.sqrt(np.sum((y - y_mean) ** 2))
+
+            if den_x == 0 or den_y == 0:
+                corr_matrix[i, j] = 0
+            else:
+                corr_matrix[i, j] = num / (den_x * den_y)
+
+    return corr_matrix
+
+
+@jit(nopython=True, parallel=True)
+def fast_pearsonr_vector(X, Y):
+    """
+    Fast computation of Pearson correlation vector using Numba.
+    X: (n_features, n_timepoints)
+    Y: (n_features, n_timepoints)
+    Returns: (n_timepoints,)
+    """
+    n_features, n_timepoints = X.shape
+    corr_vector = np.zeros(n_timepoints)
+
+    for t in prange(n_timepoints):
+        x = X[:, t]
+        y = Y[:, t]
+
+        x_mean = np.mean(x)
+        y_mean = np.mean(y)
+
+        num = np.sum((x - x_mean) * (y - y_mean))
+        den_x = np.sqrt(np.sum((x - x_mean) ** 2))
+        den_y = np.sqrt(np.sum((y - y_mean) ** 2))
+
+        if den_x == 0 or den_y == 0:
+            corr_vector[t] = 0
+        else:
+            corr_vector[t] = num / (den_x * den_y)
+
+    return corr_vector
+
+
+
+
+def _single_iteration(X, y, iteration_seed, across_time):
+    """
+    Single iteration of cross-validation for parallelization.
+
+    Parameters
+    ----------
+    X : ndarray
+        Input data
+    y : ndarray
+        Labels
+    iteration_seed : int
+        Random seed for this iteration
+    across_time : bool
+        Whether to compute across-time correlations
+
+    Returns
+    -------
+    correlation_result : ndarray
+        Correlation matrix or vector for this iteration
+    """
+
+    def condi_avg(data, labels):
+        """Optimized for binary classification."""
+        mask = labels.astype(bool)
+        condition_0 = data[~mask].mean(axis=0)
+        condition_1 = data[mask].mean(axis=0)
+        return np.array([condition_0, condition_1])
+
+
+    # Set seed for this iteration (convert numpy int to Python int)
+    seed_value = int(iteration_seed)  # Convert to native Python int
+    np.random.seed(seed_value)
+    random.seed(seed_value)
+
+    n_trials = X.shape[0]
+
+    # Create random split
+    idx_rnd = np.concatenate([np.zeros(n_trials // 2), np.ones(n_trials // 2)])
+    if (n_trials % 2) > 0:
+        idx_rnd = np.concatenate([idx_rnd, [1.0]])
+    np.random.shuffle(idx_rnd)
+
+    # Split data
+    X1 = X[idx_rnd < 1, :, :]
+    y1 = y[idx_rnd < 1]
+    X2 = X[idx_rnd > 0, :, :]
+    y2 = y[idx_rnd > 0]
+
+    # Z-score
+    X1 = zscore(X1, axis=1)
+    X2 = zscore(X2, axis=1)
+
+    # Compute condition averages
+    condition_averages1 = condi_avg(X1, y1)
+    condition_averages2 = condi_avg(X2, y2)
+
+    # Compute differences between conditions
+    diffTrain = condition_averages1[0, :, :] - condition_averages1[1, :, :]
+    diffTest = condition_averages2[0, :, :] - condition_averages2[1, :, :]
+
+    # Compute correlations using fast functions
+    if across_time:
+        # Temporal generalization: correlate across all time point pairs
+        corr1 = fast_pearsonr_matrix(diffTrain, diffTest)
+        corr2 = fast_pearsonr_matrix(diffTest, diffTrain)
+        return np.tanh(np.mean(np.arctanh(np.array([corr1, corr2])), axis=0))
+    else:
+        # Within-time correlations only
+        return fast_pearsonr_vector(diffTrain, diffTest)
+
+
+class NeuralCorrelationDecoder(BaseEstimator, ClassifierMixin):
+    """
+    Optimized neural correlation decoder with parallel processing and JIT compilation.
+
+    Parameters
+    ----------
+    n_iterations : int, default=10
+        Number of cross-validation iterations to perform
+    across_time : bool, default=True
+        If True, compute correlations across all time point pairs (temporal generalization)
+        If False, compute correlations only within the same time points
+    random_state : int, RandomState instance or None, default=None
+        Controls the randomness of the cross-validation splits
+    n_jobs : int, default=-1
+        Number of parallel jobs. -1 means use all available cores
+    batch_size : int, default=None
+        Batch size for parallel processing. If None, uses n_iterations // n_cores
+    """
+
+    def __init__(self, n_iterations=10, across_time=True, random_state=None,
+                 n_jobs=-1, batch_size=None):
+        self.n_iterations = n_iterations
+        self.across_time = across_time
+        self.random_state = random_state
+        self.n_jobs = n_jobs
+        self.batch_size = batch_size
+
+    def _validate_input(self, X, y=None):
+        """Validate input data format."""
+        if X.ndim != 3:
+            raise ValueError(f"Expected 3D array (n_trials, n_features, n_timepoints), "
+                             f"got {X.ndim}D array")
+
+        if y is not None:
+            if len(np.unique(y)) != 2:
+                raise ValueError("This decoder only supports binary classification "
+                                 f"(2 classes), got {len(np.unique(y))} classes")
+
+        return X, y
+
+    def fit(self, X, y):
+        """
+        Fit the neural correlation decoder using parallel processing.
+
+        Parameters
+        ----------
+        X : array-like of shape (n_trials, n_features, n_timepoints)
+            Training data
+        y : array-like of shape (n_trials,)
+            Target values (binary classification)
+
+        Returns
+        -------
+        self : object
+            Returns the instance itself
+        """
+        # Validate inputs
+        X, y = check_X_y(X, y, allow_nd=True)
+        X, y = self._validate_input(X, y)
+
+        # Store classes
+        self.classes_ = unique_labels(y)
+
+        # Generate seeds for each iteration to ensure reproducibility
+        if self.random_state is not None:
+            np.random.seed(self.random_state)
+            seeds = np.random.randint(0, 2 ** 31, self.n_iterations)
+        else:
+            seeds = np.random.randint(0, 2 ** 31, self.n_iterations)
+
+        # Determine number of jobs
+        n_jobs = self.n_jobs
+        if n_jobs == -1:
+            n_jobs = mp.cpu_count()
+        elif n_jobs <= 0:
+            n_jobs = max(1, mp.cpu_count() + n_jobs)
+
+        # Parallel computation of iterations
+        # Handle batch_size properly for joblib
+        parallel_kwargs = {'n_jobs': n_jobs}
+        if self.batch_size is not None:
+            parallel_kwargs['batch_size'] = self.batch_size
+
+        results = Parallel(**parallel_kwargs)(
+            delayed(_single_iteration)(X, y, seed, self.across_time)
+            for seed in seeds
+        )
+
+        # Convert results to numpy array and average using Fisher z-transform
+        corrs_iters = np.array(results)
+
+        # Handle potential NaN/inf values before arctanh
+        corrs_iters = np.clip(corrs_iters, -0.99999, 0.99999)
+
+        self.correlation_matrix_ = np.tanh(np.mean(np.arctanh(corrs_iters), axis=0))
+        self.is_fitted_ = True
+
+        return self
+
+    def get_correlation(self):
+        """Get the fitted correlation matrix."""
+        check_is_fitted(self, 'is_fitted_')
+        return self.correlation_matrix_
+
+    def set_params(self, **params):
+        """Set the parameters of this estimator."""
+        for key, value in params.items():
+            if hasattr(self, key):
+                setattr(self, key, value)
+            else:
+                raise ValueError(f"Invalid parameter {key}")
+        return self
+
+    def get_params(self, deep=True):
+        """Get parameters for this estimator."""
+        return {
+            'n_iterations': self.n_iterations,
+            'across_time': self.across_time,
+            'random_state': self.random_state,
+            'n_jobs': self.n_jobs,
+            'batch_size': self.batch_size
+        }
+
+def decode_time(X, y, n_inter=1, return_inter=False):
+    y = np.array(y)
+
+    scores_all = []
+    for n in range(n_inter):
+
+        clf = make_pipeline(
+            StandardScaler(),
+            SVM(C=5e-4))
+
+        time_gen = GeneralizingEstimator(clf, scoring="roc_auc", n_jobs=-1, verbose=True)
+
+        n_trls = X.shape[0]
+        idx_rnd = np.concatenate([np.zeros(n_trls // 2), np.ones(n_trls // 2)])
+        if (n_trls % 2) > 0:
+            idx_rnd = np.concatenate([idx_rnd, [1.0]])
+        random.shuffle(idx_rnd)
+
+
+        X1 = X[idx_rnd < 1, :, :]
+        y1 = y[idx_rnd < 1]
+        X2 = X[idx_rnd > 0, :, :]
+        y2 = y[idx_rnd > 0]
+
+        time_gen.fit(X1, y1)
+        score1 = time_gen.score(X2, y2)
+
+        time_gen.fit(X2, y2)
+        score2 = time_gen.score(X1, y1)
+        scores_all.append(np.array([score1, score2]).mean(0))
+
+    if return_inter:
+        return scores_all
+    else:
+        return np.mean(np.array(scores_all), axis=0)
+
+
+def dy_mask(obs, rnd, clusteralpha=0.05):
+    '''
+       looks for significant off diagonal reduction
+
+       Params:
+       obs: 2d observations
+       rnd: 3d randomizations (randomizations are in trailing dimension)
+
+       Outputs:
+       dynaMask: 1d dynamism index (time-resolved)
+
+   '''
+
+    # Computing the mask
+
+    # get the diagonal twice, reshape to allow easy comparison with full matrix
+    dynaObsA = np.diag(obs)[:, np.newaxis] - obs
+    dynaObsB = np.diag(obs)[np.newaxis, :] - obs
+
+    # do the same for the randomizations
+    dynaRndA = np.diagonal(rnd)[:, :, np.newaxis] - rnd.T
+    dynaRndB = np.diagonal(rnd)[:, np.newaxis, :] - rnd.T
+    dynaRndA = dynaRndA.T
+    dynaRndB = dynaRndB.T
+
+    pDynaA, labDynaA = permutation_test(obsdat=dynaObsA, rnddat=dynaRndA, tail=1,  clusteralpha=clusteralpha)
+    pDynaB, labDynaB = permutation_test(dynaObsB, dynaRndB, tail=1, clusteralpha=clusteralpha)
+
+    dynaMask = (pDynaA < 0.05) & (pDynaB < 0.05)
+
+    di = (np.mean(dynaMask, axis=0) + np.mean(dynaMask, axis=1)) / 2
+
+    return di, dynaMask
+
+
+def plot_time_generalisation(gs, fig, dec, rnd=None, times_sec=None, vmin=-1, vmax=1.0,
+                             matrix_limits=None, tick_positions=None,
+                             reference_lines=None, cmap="RdBu_r", title= "Coding stability", stat_test ='off-diagonal', clusteralpha=0.05, tail=0):
+    """
+    Plot time generalisation matrix with both dynamism and stability indices
+
+    This function creates a comprehensive visualisation of temporal generalisation
+    within a specified grid position.
+
+    Parameters:
+    -----------
+    gs : matplotlib GridSpec slice
+        GridSpec slice (e.g., gs[0,0] for single cell or gs[0,0:2] for spanning cells)
+    fig : matplotlib Figure
+        The figure object to add the subplot to
+    dec : ndarray
+        The decoding matrix to display (observation)
+    rnd : ndarray, optional
+        Randomization matrix with shape (time, time, n_randomizations)
+    times_sec : ndarray, optional
+        Time points in seconds. If None, creates a default range
+    vmin, vmax : float
+        Min and max values for color mapping
+    matrix_limits : tuple, optional
+        (min_idx, max_idx) limits for both x and y axes
+    tick_positions : list or ndarray, optional
+        Indices where to place ticks
+    reference_lines : list, optional
+        Time points where to place reference lines
+    cmap : str
+        Colormap to use
+    """
+    import numpy as np
+    import matplotlib.pyplot as plt
+    from scipy.ndimage import label
+
+    # Get current figure (use the provided fig parameter)
+    # fig is already provided as parameter
+
+    # Create default time range if not provided
+    if times_sec is None:
+        times_sec = np.linspace(-0.1, 1.1, dec.shape[-1])
+
+    # Create default tick positions if not provided
+    if tick_positions is None:
+        tick_positions = np.array([10, 60, 110])
+
+    # Create default reference lines if not provided
+    if reference_lines is None:
+        reference_lines = [0, 0.5, 1.0]
+
+    # Create subplot using the provided GridSpec
+    ax = fig.add_subplot(gs)
+
+    # Plot the main time generalization matrix
+    im = ax.matshow(
+        dec,
+        vmin=vmin,
+        vmax=vmax,
+        cmap=cmap,
+        origin="lower",
+    )
+
+    # Compute dynamism and stability if randomization data is provided
+    if rnd is not None:
+
+        if stat_test == 'off-diagonal':
+            # Get dynamism index and significance mask
+            _, sig_mask = dy_mask(dec, rnd, clusteralpha=clusteralpha)
+        elif stat_test == 'on-diagonal':
+            p_vals, cluster_labels = permutation_test(
+                obsdat=dec,
+                rnddat=rnd,
+                clustercorrect=True,
+                clusteralpha=clusteralpha,
+                tail = tail,
+            )
+            # Create mask for significant areas (p <= 0.05)
+            sig_mask = p_vals <= 0.05
+
+        # Plot significance masks on the main plot
+        if np.any(sig_mask):
+            # Use contour to outline significant dynamism areas
+            ax.contour(sig_mask, levels=[0.5], colors='black',
+                       linestyles='-', linewidths=0.8)
+
+    # Set tick labels
+    tick_labels = [f"{times_sec[i]:.1f}" for i in tick_positions]
+
+    # Set the ticks and labels
+    ax.set_xticks(tick_positions)
+    ax.set_xticklabels(tick_labels)
+    ax.set_yticks(tick_positions)
+    ax.set_yticklabels(tick_labels)
+
+    # Set matrix display limits if provided
+    if matrix_limits is not None:
+        min_idx, max_idx = matrix_limits
+        ax.set_xlim(min_idx, max_idx)
+        ax.set_ylim(min_idx, max_idx)
+
+    # Make sure ticks are at the bottom
+    ax.xaxis.set_ticks_position("bottom")
+
+    # Add reference lines to main plot
+    for time_val in reference_lines:
+        time_idx = np.argmin(np.abs(times_sec - time_val))
+        ax.axhline(time_idx, color="k", linestyle="--", linewidth=0.8)
+        ax.axvline(time_idx, color="k", linestyle="--", linewidth=0.8)
+
+    # Add axis labels
+    ax.set_xlabel('time (s)')
+    ax.set_ylabel('time (s)')
+
+    # Add title
+    ax.set_title(title)
+
+    # Add colorbar
+    cbar = fig.colorbar(im, ax=ax)
+    cbar.set_label("Pearson r")
+
+from mpl_toolkits.mplot3d.art3d import Poly3DCollection, Line3DCollection
+from sklearn.decomposition import PCA
+
+def plot_state_space_3d(ax, sel_matrix, conds, title, n_trials=100, sig=0.5, scale=20, dot_size=200, experiment=1):
+
+    col_blue = [[74 / 255, 148 / 255, 242 / 255]]
+    col_green = [[0 / 255, 168 / 255, 143 / 255]]
+    col_pink = [[229 / 255, 99 / 255, 147 / 255]]
+    col_khaki = [[164 / 255, 143 / 255, 37 / 255]]
+
+    labels_condi = np.array([0, 1, 2, 3])
+    rates = sel_matrix @ conds.T
+    rates = np.repeat(rates, n_trials, axis=1)
+    labels_condi = np.repeat(labels_condi, n_trials, axis=0)
+    rates += np.random.normal(0, sig, (sel_matrix.shape[0], 4 * n_trials))
+    rates -= np.mean(rates, axis=1, keepdims=True)
+    rates = rates.T
+
+    comps = PCA(n_components=3).fit_transform(rates)
+    comps = condi_avg(comps[:, :, None], labels_condi)[:, :, 0]
+
+    x, y, z = comps[:, 0], comps[:, 1], comps[:, 2]
+    tupleList = list(zip(x, y, z))
+    vertices = [[0, 1, 2], [0, 1, 3], [0, 2, 3], [1, 2, 3]]
+    poly3d = [[tupleList[v] for v in tri] for tri in vertices]
+
+    ax.add_collection3d(Poly3DCollection(poly3d, facecolors='silver', linewidths=1, alpha=0.5, zorder=-100))
+    ax.add_collection3d(Line3DCollection(poly3d, colors='k', linewidths=0.5, linestyles=':', zorder=-100))
+
+    if experiment == 1:
+        ax.scatter(*comps[0], marker='s', color=col_blue, edgecolor='k', s=dot_size, zorder=10)
+        ax.scatter(*comps[1], marker='D', color=col_blue, edgecolor='k', s=dot_size, zorder=10)
+        ax.scatter(*comps[2], marker='s', color=col_green, edgecolor='k', s=dot_size, zorder=10)
+        ax.scatter(*comps[3], marker='D', color=col_green, edgecolor='k', s=dot_size, zorder=10)
+    elif experiment == 2:
+        ax.scatter(*comps[0], marker='o', color=col_blue, edgecolor='k', s=dot_size, zorder=10)
+        ax.scatter(*comps[1], marker='o', color=col_green, edgecolor='k', s=dot_size, zorder=10)
+        ax.scatter(*comps[2], marker='o', color=col_khaki, edgecolor='k', s=dot_size, zorder=10)
+        ax.scatter(*comps[3], marker='o', color=col_pink, edgecolor='k', s=dot_size, zorder=10)
+
+    ax.set_xlim3d([-scale, scale])
+    ax.set_ylim3d([-scale, scale])
+    ax.set_zlim3d([-scale, scale])
+    ax.set_title(title)
+
+    plane_col = [(0.95, 0.95, 0.95, 1.0), (0.98, 0.98, 0.98, 1.0), (0.92, 0.92, 0.92, 1.0)]
+    for axis, col in zip([ax.xaxis, ax.yaxis, ax.zaxis], plane_col):
+        axis.set_pane_color(col)
+        axis.line.set_color(col)
+
+    ax.set_xticks([])
+    ax.set_yticks([])
+    ax.set_zticks([])
+    ax.view_init(elev=30., azim=45)
+    ax.grid(False)
+
+def plot_bar_epochs_with_null(gs, fig, scores, scores_rnd, title='', ylabel='Accuracy', xlabel='stage(ler)',
+                              ylim=[0.35, 0.7], alpha=0.05,
+                              color=['grey', 'black'], cross_gen_idx=1, tail='two'):
+    """
+    Plot bar chart comparing first and last epoch with null distribution shading.
+
+    Parameters:
+    -----------
+    gs : GridSpec subplot
+        GridSpec location for the plot
+    fig : matplotlib Figure
+        Figure object
+    scores : array-like, shape (n_cross_gen, n_epochs) or (n_epochs,)
+        Observed scores across epochs. If 2D, will extract cross_gen_idx row.
+    scores_rnd : array-like, shape (n_reps, n_cross_gen, n_epochs) or (n_reps, n_epochs)
+        Null distribution scores. If 3D, will extract cross_gen_idx column.
+    title : str
+        Plot title
+    ylabel : str
+        Y-axis label
+    ylim : list
+        Y-axis limits [ymin, ymax]
+    chance_level : float
+        Chance level for reference line (currently not used directly in the test)
+    alpha : float
+        Significance threshold (default 0.05)
+    color : list or str
+        Colors for [Stage 1, Stage 4] bars (default ['grey', 'black'])
+    cross_gen_idx : int
+        Which cross-generalization condition to plot (0=within-set, 1=cross-set)
+        Only used if scores/scores_rnd are 2D/3D
+
+    Returns:
+    --------
+    ax : matplotlib Axes
+        The axes object
+    p_values : list
+        P-values for first and last epoch
+    """
+    ax = fig.add_subplot(gs)
+
+    # Handle matrix input - extract the specified cross-generalization condition
+    if scores.ndim == 2:
+        scores = scores[cross_gen_idx, :]
+    if scores_rnd.ndim == 3:
+        scores_rnd = scores_rnd[:, cross_gen_idx, :]
+
+    # Ensure color is a list
+    if isinstance(color, str):
+        color = [color, color]
+
+    # Extract first and last epoch
+    epochs_to_plot = [0, -1]
+    x_positions = np.array([0, 1])
+
+    # Observed scores for first and last epoch
+    obs_scores = scores[epochs_to_plot]
+
+    # Null distributions for first and last epoch
+    null_first = scores_rnd[:, 0]
+    null_last = scores_rnd[:, -1]
+
+    # Means of the null distributions
+    null_mean_first = np.mean(null_first)
+    null_mean_last = np.mean(null_last)
+
+    # For shading: compute symmetric two-sided band around null mean
+    def get_band(null_dist, alpha):
+        null_mean = np.mean(null_dist)
+        null_centered = null_dist - null_mean
+        crit = np.quantile(np.abs(null_centered), 1 - alpha)  # P(|null_centered| >= crit) ≈ alpha
+        lower = null_mean - crit
+        upper = null_mean + crit
+        return lower, upper, null_mean
+
+    lower_first, upper_first, null_mean_first = get_band(null_first, alpha)
+    lower_last,  upper_last,  null_mean_last  = get_band(null_last,  alpha)
+
+    null_lower = [lower_first, lower_last]
+    null_upper = [upper_first, upper_last]
+    null_mean  = [null_mean_first, null_mean_last]
+
+    # Plot bars with different colors
+    for x_pos, obs_val, bar_color in zip(x_positions, obs_scores, color):
+        ax.bar(x_pos, obs_val, width=0.6, color=bar_color, linewidth=1.5)
+
+    # Add null distribution shading (central (1 - alpha) band)
+    for i, x_pos in enumerate(x_positions):
+        ax.fill_between(
+            [x_pos - 0.45, x_pos + 0.45],
+            [null_lower[i], null_lower[i]],
+            [null_upper[i], null_upper[i]],
+            edgecolor=None,
+            facecolor='lightgrey',
+            zorder=0
+        )
+
+    # Calculate p-values
+    p_values = []
+    for i, idx in enumerate(epochs_to_plot):
+        if idx == 0:
+            null_dist = null_first
+            null_mean_i = null_mean_first
+        else:
+            null_dist = null_last
+            null_mean_i = null_mean_last
+
+        obs_val = obs_scores[i]
+
+        if tail == 'two':
+            # Two-sided, consistent with the band: |null - mean|null >= |obs - mean|
+            null_centered = null_dist - null_mean_i
+            obs_centered = obs_val - null_mean_i
+            p_val = np.mean(np.abs(null_centered) >= np.abs(obs_centered))
+
+        elif tail == 'greater':
+            # One-tailed: observed > null (raw)
+            p_val = np.mean(null_dist >= obs_val)
+
+        elif tail == 'less':
+            # One-tailed: observed < null (raw)
+            p_val = np.mean(null_dist <= obs_val)
+
+        else:
+            raise ValueError(f"Unknown tail type: {tail}")
+
+        p_values.append(p_val)
+
+    # Add significance stars
+    for x_pos, p_val, obs_val in zip(x_positions, p_values, obs_scores):
+        if p_val < 0.001:
+            stars = '***'
+        elif p_val < 0.01:
+            stars = '**'
+        elif p_val < alpha:
+            stars = '*'
+        else:
+            stars = 'ns'
+
+        # Position stars slightly above the bar height
+        star_height = obs_val + (ylim[1] - ylim[0]) * 0.03  # 3% above bar
+        ax.text(x_pos, star_height, stars, ha='center', va='bottom', fontsize=11)
+
+    # Add chance/null-level line (using mean of the two null means as reference)
+    ax.axhline(y=np.mean(null_mean), color='black', linestyle='--',
+               linewidth=1, alpha=0.5, zorder=0)
+
+    # Formatting
+    ax.set_ylim(ylim)
+    ax.set_xlim([-0.5, 1.5])
+    ax.set_xticks(x_positions)
+    ax.set_yticklabels([])
+    ax.set_xticklabels(['1', '4'], fontsize=10)
+    ax.set_ylabel(ylabel, fontsize=11)
+    ax.set_xlabel(xlabel, fontsize=11)
+    ax.set_title(title, fontsize=12)
+    ax.spines['top'].set_visible(False)
+    ax.spines['right'].set_visible(False)
+
+    return ax, p_values
+
+def compute_learning_effect_pvalue(scores_real, scores_permuted, two_tailed=False):
+    """
+    Compute permutation-based p-value for learning effect difference.
+
+    Parameters
+    ----------
+    scores_real : array, shape (2, n_subjects)
+        Real data where rows are [stage1, stage4] and columns are subjects
+    scores_permuted : array, shape (n_permutations, 2, n_subjects)
+        Permuted data with same structure
+    two_tailed : bool, default=False
+        If True, compute two-tailed p-value
+
+    Returns
+    -------
+    p_value : float
+        Permutation-based p-value
+    diff_ler_obs : float
+        Observed learning effect difference
+    diff_ler_null : array, shape (n_permutations,)
+        Null distribution of learning effect differences
+    """
+    # Compute observed learning effect
+    diff_obs = scores_real[1, :] - scores_real[0, :]
+
+    # Compute difference of differences
+    diff_ler_obs = diff_obs[-1] - diff_obs[0]
+
+    # Compute null distribution
+    diff_null = scores_permuted[:, 1, :] - scores_permuted[:, 0, :]
+    diff_ler_null = diff_null[:, -1] - diff_null[:, 0]
+
+    # Compute p-value
+    if two_tailed:
+        p_value = np.mean(np.abs(diff_ler_null) >= np.abs(diff_ler_obs))
+    else:
+        p_value = np.mean(diff_ler_null >= diff_ler_obs)
+
+    return p_value,diff_ler_obs, diff_ler_null
+
+def transform_xgen_dec_into_magnitude(decoding_matrix, decoding_matrix_null=None, decoding_matrix_null_ler=None, chance=0.5):
+
+    delta_obs = (decoding_matrix[1, :] - decoding_matrix_null[1, :, :].mean(-1)) / (
+                decoding_matrix[0, :] - decoding_matrix_null[0, :, :].mean(-1))
+    delta_obs_rnd = (decoding_matrix_null[1, :, :] - decoding_matrix_null[1, :, :].mean(-1)[:, None]) / (decoding_matrix[0, :][:,None] - decoding_matrix_null[0, :, :].mean(-1)[:, None])
+
+    delta_obs_rnd_ler = (decoding_matrix_null_ler[:,1,:] - chance)/(decoding_matrix_null_ler[:,0,:] - chance)
+
+    return delta_obs, delta_obs_rnd, delta_obs_rnd_ler
+
+
+def plot_magnitude(gs, fig, mag_obs, mag_null_within, mag_null_ler,
+                   title, y_lim=[-1,1], alpha=0.05):
+    """
+    Plot cross-generalization magnitude across learning stages as bars.
+
+    Parameters
+    ----------
+    mag_obs : array, shape (n_stages,)
+        Observed magnitude values
+    mag_null_within : array, shape (n_permutations, n_stages)
+        Null distribution where only cross-gen is shuffled
+    mag_null_ler : array, shape (n_permutations, n_stages)
+        Full permutation null (both within and cross-gen shuffled)
+    """
+    x_data = np.arange(len(mag_obs)) + 1
+    ax = fig.add_subplot(gs)
+
+    # Bar plot
+    ax.bar(x_data, mag_obs, color='black', width=0.6, zorder=5)
+
+    ax.set_xticks(x_data)
+    ax.set_xticklabels(x_data)
+    sns.despine(right=True, top=True)
+    ax.set_ylabel('% of ceiling')
+    ax.set_xlabel('learning stage')
+    ax.set_title(title)
+
+    # --- Null band from mag_null_within ---
+    null_flat = mag_null_within.flatten()
+    null_mean = null_flat.mean()
+
+    # Center around mean
+    null_centered = null_flat - null_mean
+    crit = np.quantile(np.abs(null_centered), 1 - alpha)
+
+    lower = null_mean - crit
+    upper = null_mean + crit
+
+    # Mean line
+    ax.axhline(null_mean, linestyle='--', linewidth=1,
+               color='black', zorder=-6, alpha=0.7)
+    ax.axhline(1, linestyle='--', linewidth=1,
+               color='black', zorder=-6, alpha=0.7)
+
+    # Null band
+    rect = patches.Rectangle(
+        (x_data[0] - 0.5, lower),
+        len(x_data),
+        upper - lower,
+        edgecolor=None,
+        facecolor='lightgrey',
+        zorder=-7,
+    )
+    ax.add_patch(rect)
+
+    # --- Horizontal bracket: Learning effect (Stage 1 vs Stage 4) ---
+    # Bracket displayed from BELOW with arms pointing UP
+    y_range = y_lim[1] - y_lim[0]
+    bracket_base = y_lim[0] + 0.2 * y_range  # Changed from y_lim[1] - 0.11
+    bracket_height = bracket_base - 0.06 * y_range  # Changed sign to go down
+    bracket_center = (x_data[0] + x_data[-1]) / 2
+    gap_size = 1.2
+
+    print('Learning effect (magnitude increase):')
+    p_value_learning = compute_p_value(mag_obs[-1], mag_obs[0],
+                                       mag_null_ler[:, -1], mag_null_ler[:, 0],
+                                       tail='greater')
+
+    # Draw bracket - arms now point UP from below
+    ax.plot([x_data[0], x_data[0]], [bracket_height, bracket_base],
+            color='black', linewidth=1)
+    ax.plot([x_data[-1], x_data[-1]], [bracket_height, bracket_base],
+            color='black', linewidth=1)
+    ax.plot([x_data[0], bracket_center - gap_size / 2],
+            [bracket_height, bracket_height], color='black', linewidth=1)
+    ax.plot([bracket_center + gap_size / 2, x_data[-1]],
+            [bracket_height, bracket_height], color='black', linewidth=1)
+
+    ax.text(bracket_center, bracket_height * 1.2, p_into_stars(p_value_learning),
+            fontsize=10, color='black', ha='center', va='bottom')  # Changed va to 'bottom'
+
+    ax.set_ylim(y_lim)
+
+    return ax
+
+def plot_significance_stars(ax, scores_real, scores_null, time_window, ylim, tail='two', y_position=None, dec_type=0):
+    """
+    Compute p-value and plot significance stars on a time-resolved decoding plot.
+
+    Parameters:
+    -----------
+    ax : matplotlib axis object
+        The axis to plot on
+    scores_real : array
+        Real decoding scores of shape [decoding_type, time_points]
+    scores_null : array
+        Null distribution scores of shape [n_reps, decoding_type, time_points]
+    time_window : tuple or list
+        (start, end) in milliseconds for the time window
+    ylim : tuple or list
+        (ymin, ymax) of the plot
+    tail : str
+        'two', 'greater', or 'less' for the statistical test
+    y_position : float, optional
+        Y-position for stars. If None, uses 90% of ylim range
+    """
+    # Compute p-value comparing first and last timepoint
+    p_val = compute_p_value(scores_real[dec_type, 0], scores_real[dec_type, -1],
+                            scores_null[:, dec_type, 0], scores_null[:, dec_type, -1],
+                            tail=tail)
+
+    # Convert p-value to stars
+    if p_val <= 0.001:
+        stars = '***'
+        font_size = 15
+        scaler_position = 0.8
+    elif p_val <= 0.01:
+        stars = '**'
+        font_size = 15
+        scaler_position = 0.8
+    elif p_val <= 0.05:
+        stars = '*'
+        font_size = 15
+        scaler_position = 0.8
+    elif p_val <= 0.1:
+        stars = '†'
+        font_size = 10
+        scaler_position = 0.8
+    else:
+        stars = 'ns'
+        font_size = 10
+        scaler_position = 0.9
+
+    # Calculate center of time window in seconds
+    tw_center = (((time_window[0] + time_window[1]) / 2) / 100) - 0.5
+
+    # Calculate y-position (default to 90% of y-range for better spacing)
+    if y_position is None:
+        y_position = ylim[0] + scaler_position * (ylim[1] - ylim[0])
+
+    # Plot stars
+    ax.text(tw_center, y_position, stars,
+            ha='center', va='center',
+            fontsize=font_size,
+            color='black')
+
+    return ax

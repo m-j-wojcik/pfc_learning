@@ -1,14 +1,17 @@
 ANALYSIS_PARAMS:
+  OBSERVE_OR_RUN_PREPROCESSING: 'observe'
   OBSERVE_OR_RUN: 'observe'
-  OBSERVE_OR_RUN_TIME: 'observe'
-  DATA_MODE: 'stages'
   N_STAGES: 4
   N_WINDOWS: 3
   SAMPLED_AREAS: [0, 5]
   SAMPLED_AREAS_NAMES: ['dPFC', 'vPFC']
-  TIME_WINDOW: [140, 150]
-  TIME_WINDOW_EARLY: [90, 100]
-  N_REPS: 200
+  TIME_WINDOW_EXP1_SEL: [140, 150]
+  TIME_WINDOW_EXP1_COL_LOCK: [50, 150]
+  TIME_WINDOW_EXP1_SHAPE_LOCK: [100, 150]
+  TIME_WINDOW_EXP2_SEL: [70, 100]
+  TIME_WINDOW_EXP2_COL_LOCK: [50, 100]
+  TIME_WINDOW_EXP2_SHAPE_LOCK: [100, 150]
+  N_REPS: 1000
   COLOUR_ID: 0
   SHAPE_ID: 1
   WIDTH_ID: 2
@@ -30,6 +33,7 @@ ENCODING_EXP2:
   shape: [ 0, 0, 1, 1, 0, 0, 1, 1, 0, 0, 1, 1, 0, 0, 1, 1 ]
   width: [ 0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 1  ]
   xor: [ 1, 1, 0, 0, 0, 0, 1, 1, 1, 1, 0, 0, 0, 0, 1, 1 ]
+  xor2: [1, 1, 1, 1, 0, 0, 0, 0, 0, 0, 0, 0, 1, 1, 1, 1]
 SEL_ENCODING_EXP1:
   colour_sel: [-1, -1, -1, -1, 1, 1, 1, 1]
   shape_sel: [-1, -1, 1, 1, -1, -1, 1, 1]
@@ -39,17 +43,16 @@ SEL_ENCODING_EXP1:
 SEL_ENCODING_EXP2:
   context_sel: [-1, -1, -1, -1, 1, 1, 1, 1, -1, -1, -1, -1, 1, 1, 1, 1]
   set_sel: [-1, -1, -1, -1, -1, -1, -1, -1, 1, 1, 1, 1, 1, 1, 1, 1]
-  shape_sel: [-1, 1, -1, 1, -1, 1, -1, 1, -1, 1, -1, 1, -1, 1, -1, 1]
+  shape_sel: [-1, -1, 1, 1, -1, -1, 1, 1, -1, -1, 1, 1, -1, -1, 1, 1]
+  xor_sel: [1, 1, -1, -1, -1, -1, 1, 1, 1, 1, -1, -1, -1, -1, 1, 1]
 
 PATHS:
-  output_path: './data/pre_processed/'
-  out_template_spks: './data/pre_processed/{0}_Spikes_preprocessed.npy'
-  out_template_meta: './data/pre_processed/{0}_meta.npy'
-  out_template_sel_exc: './data/pre_processed/{0}_sel_exc.npy'
-  out_template_loc: './data/pre_processed/{0}_cell_loc.csv'
-  out_template_sel_list: './data/pre_processed/{0}_selectivity.csv'
-  out_template_figures: './figures/'
-  in_template_beh: './data/mat/{0}Event_re.mat'
+  output_path: './processed_data/'
+  out_template_spks: '/Volumes/MW_DRIVE/data/pre_processed/{0}_Spikes_preprocessed.npy'
+  out_template_meta: '/Volumes/MW_DRIVE/data/pre_processed/{0}_meta.npy'
+  out_template_loc: '/Volumes/MW_DRIVE/data/pre_processed/{0}_cell_loc.csv'
+  out_template_figures: '/Users/michal_work/PycharmProjects/pfc_learning/figures/'
+  in_template_beh: '/Volumes/MW_DRIVE/data/mat/{0}Event_re.mat'
 SESSION_NAMES:
   sessions_womble_1: [
   'Wom20200910',
