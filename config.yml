@@ -3,8 +3,8 @@ ANALYSIS_PARAMS:
   OBSERVE_OR_RUN: 'observe'
   N_STAGES: 4
   N_WINDOWS: 3
-  SAMPLED_AREAS: [0, 5]
-  SAMPLED_AREAS_NAMES: ['dPFC', 'vPFC']
+  SAMPLED_AREAS: [1, 4] # take areas from 1 to 4 (including 1 and 4)
+  SAMPLED_AREAS_NAMES: ['dPFC', 'dorsal principal sulcus', 'ventral principal sulcus', 'vPFC']
   TIME_WINDOW_EXP1_SEL: [140, 150]
   TIME_WINDOW_EXP1_COL_LOCK: [50, 150]
   TIME_WINDOW_EXP1_SHAPE_LOCK: [100, 150]

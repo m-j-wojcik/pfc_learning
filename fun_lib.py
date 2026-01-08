@@ -123,7 +123,7 @@ def exclude_neurons(data, session_list, path_locations, path_sel_exclude, loc=No
             mean_firing = data_avg.mean(1)
             if loc:
                 cell_vals = pd.read_csv(path_locations.format(parts[p][s]))['Area'].values
-                exc_idc = (cell_vals > loc[0]) & (cell_vals < loc[1])
+                exc_idc = (cell_vals >= loc[0]) & (cell_vals <= loc[1])
                 if threshold:
                     exc_thr = mean_firing > threshold
                     exc_idc = np.logical_and(exc_idc, exc_thr)
