@@ -15,8 +15,8 @@ This project investigates how neural representations in the primate prefrontal c
 
 - Neural representations transition from **high-dimensional** to **low-dimensional** across learning stages
 - Early learning uses randomly mixed selectivity patterns supporting exploration
-- Late learning shows minimal, task-relevant representations supporting generalization
-- Cross-generalization to novel stimulus sets reveals abstract, stimulus-invariant neural codes
+- Late learning shows minimal, task-relevant representations supporting generalisation
+- Cross-generalisation to novel stimulus sets reveals abstract, stimulus-invariant neural codes
 
 ## Data Requirements
 
@@ -171,7 +171,7 @@ python supp_fig_7.py   # Requires: figure_*.py outputs
 The analysis pipeline has two stages, each with its own run/observe control in `config.yml`:
 
 #### Stage 1: Preprocessing (`OBSERVE_OR_RUN_PREPROCESSING`)
-- **Run mode** (`'run'`): Generates firing rate files from raw spike data and groups sessions into learning stages
+- **Run mode** (`'run'`): Generates downsampled, filtered firing rate files and groups sessions into learning stages
 - **Observe mode** (`'observe'`): Uses previously generated preprocessed files
 
 #### Stage 2: Analysis (`OBSERVE_OR_RUN`)
@@ -211,26 +211,19 @@ ANALYSIS_PARAMS:
 - **Generated figures** are saved to `./figures/` directory
 - **Cached analysis results** are stored in `./processed_data/` directory to speed up subsequent runs
 
-### Output
-
-- **Generated figures** are saved to `./figures/` directory
-- **Cached analysis results** are stored in `./processed_data/` directory to speed up subsequent runs
-
 ## Analysis Methods
 
 ### Key Analyses Implemented
 
 1. **Linear SVM Decoding** - Time-resolved decoding of task variables (color, shape, XOR) using support vector machines
 
-2. **Cross-Generalization Analysis** - Tests how well decoders trained on one condition generalize to other conditions, revealing the abstract structure of neural representations
+2. **Cross-Generalisation Analysis** - Tests how well decoders trained on one condition generalise to other conditions, revealing the abstract structure of neural representations
 
 3. **Shattering Dimensionality** - Measures the effective dimensionality by testing all possible binary dichotomies in the task space
 
 4. **Selectivity Space Analysis** - Multiple linear regression to characterize single-neuron selectivity patterns and compare to theoretical models (random mixed vs. minimal selectivity)
 
-5. **Cross-Stimulus Set Generalization** - Examines whether learned representations transfer to novel stimulus sets (Experiment 2)
-
-6. **Cluster-Based Permutation Testing** - Statistical testing with family-wise error rate correction for time-resolved analyses
+5. **Cross-Stimulus Set Generalisation** - Examines whether learned representations transfer to novel stimulus sets (Experiment 2)
 
 ## Experiments
 
@@ -248,17 +241,17 @@ If you use this code or data, please cite:
 @article{wojcik2024learning,
   title={Learning shapes neural geometry in the prefrontal cortex},
   author={W{\'o}jcik, Micha{\l} J and Stroud, Jake P and Wasmuht, Dante and Kusunoki, Makoto and Kadohisa, Mikiko and Buckley, Mark J and Costa, Rui Ponte and Myers, Nicholas E and Hunt, Laurence T and Duncan, John and Stokes, Mark G},
-  journal={[Journal Name]},
+  journal={[BioRxiv]},
   year={2024}
 }
 ```
 
 **Data citation:**  
-Wójcik, Michał; Stroud, Jake; Wasmuht, Dante et al. (Forthcoming 2026). Electrophysiological recordings of prefrontal activity over learning in non-human primates [Dataset]. Dryad. https://doi.org/10.5061/dryad.c2fqz61kb
+Wójcik, Michał; Stroud, Jake; Wasmuht, Dante et al. (2024). Electrophysiological recordings of prefrontal activity over learning in non-human primates [Dataset]. Dryad. https://doi.org/10.5061/dryad.c2fqz61kb
 
 ## License
 
-[To be added - specify your license, e.g., MIT, GPL-3.0, etc.]
+CC-BY 
 
 ## Contact
 
@@ -273,6 +266,5 @@ We thank all colleagues for feedback and support. Special acknowledgment to Mark
 
 ## Additional Resources
 
-- **Paper**: [Link to published paper]
+- **Paper**: [will be updated]
 - **Data**: https://datadryad.org/stash/dataset/doi:10.5061/dryad.c2fqz61kb
-- **Lab Website**: [Link to lab website]
