@@ -251,12 +251,7 @@ Wójcik, Michał; Stroud, Jake; Wasmuht, Dante et al. (2024). Electrophysiologic
 
 ## License
 
-CC-BY 
-
-## Contact
-
-For questions or issues, please contact:
-- Michał J. Wójcik: michal.wojcik@dpag.ox.ac.uk
+CC-BY
 
 ## Acknowledgments
 
