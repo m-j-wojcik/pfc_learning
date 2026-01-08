@@ -45,14 +45,13 @@ SEL_ENCODING_EXP2:
   set_sel: [-1, -1, -1, -1, -1, -1, -1, -1, 1, 1, 1, 1, 1, 1, 1, 1]
   shape_sel: [-1, -1, 1, 1, -1, -1, 1, 1, -1, -1, 1, 1, -1, -1, 1, 1]
   xor_sel: [1, 1, -1, -1, -1, -1, 1, 1, 1, 1, -1, -1, -1, -1, 1, 1]
-
 PATHS:
   output_path: './processed_data/'
-  out_template_spks: '/Volumes/MW_DRIVE/data/pre_processed/{0}_Spikes_preprocessed.npy'
-  out_template_meta: '/Volumes/MW_DRIVE/data/pre_processed/{0}_meta.npy'
-  out_template_loc: '/Volumes/MW_DRIVE/data/pre_processed/{0}_cell_loc.csv'
-  out_template_figures: '/Users/michal_work/PycharmProjects/pfc_learning/figures/'
-  in_template_beh: '/Volumes/MW_DRIVE/data/mat/{0}Event_re.mat'
+  out_template_figures: './figures/'
+  in_template_beh: './data/{0}Event_re.mat'
+  out_template_spks: './data/{0}_Spikes_preprocessed.npy'
+  out_template_meta: './data/{0}_meta.npy'
+  out_template_loc: './data/{0}_cell_loc.csv'
 SESSION_NAMES:
   sessions_womble_1: [
   'Wom20200910',
