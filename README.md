@@ -68,6 +68,11 @@ Note: Files follow the naming convention `{SubjectPrefix}{Date}_{FileType}` wher
 - Scikit-learn
 - pandas
 - PyYAML
+- seaborn
+- tqdm
+- MNE-Python (for `mne.decoding`)
+- joblib
+- numba
 
 ### Setup
 
@@ -79,7 +84,7 @@ cd pfc_learning
 
 2. Install required packages:
 ```bash
-pip install numpy scipy matplotlib scikit-learn pandas pyyaml
+pip install numpy scipy matplotlib scikit-learn pandas pyyaml seaborn tqdm mne joblib numba
 ```
 
 3. Download the data from Dryad (see Data Requirements above) and place in `./data/` directory
