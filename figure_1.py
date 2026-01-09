@@ -5,6 +5,9 @@ with open('config.yml') as file:
     config = yaml.full_load(file)
 
 
+os.makedirs(config['PATHS']['out_template_figures'], exist_ok=True)
+os.makedirs(config['PATHS']['output_path'], exist_ok=True)
+
 n_neurons = 100
 n_coeffs = 3
 opt_cov = np.diag([0, 0, 3])

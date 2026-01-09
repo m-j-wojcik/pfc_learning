@@ -5,6 +5,9 @@ with open('config.yml') as file:
     config = yaml.full_load(file)
 #%%
 
+os.makedirs(config['PATHS']['out_template_figures'], exist_ok=True)
+os.makedirs(config['PATHS']['output_path'], exist_ok=True)
+
 if config['ANALYSIS_PARAMS']['OBSERVE_OR_RUN_PREPROCESSING'] == 'run':
     if config['ANALYSIS_PARAMS']['N_STAGES'] < 5:
         ses_all = combine_session_lists(mode='stages', which_exp='exp2', combine_all=False)
