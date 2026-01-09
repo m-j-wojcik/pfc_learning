@@ -1721,8 +1721,7 @@ def xor_sim_noise(sig_min, sig_max, sig_n, n_neurons=400):
     n = 100
     perf = np.zeros((s_tot, n, 2))
     print('XOr decoding performance as a function of noice (sigma) - running simulation ')
-    for s_c, sig in enumerate(s_list):
-        print(s_c, end=',')
+    for s_c, sig in tqdm(enumerate(s_list)):
         for i in range(n):
             # Random selectivity
             cov = np.eye(3)
