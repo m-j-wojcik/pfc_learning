@@ -100,10 +100,13 @@ pip install numpy scipy matplotlib scikit-learn pandas pyyaml seaborn tqdm mne j
 ├── figure_2.py               # Analysis and plotting for Figure 2
 ├── figure_3.py               # Analysis and plotting for Figure 3
 ├── figure_4.py               # Analysis and plotting for Figure 4
+├── supp_fig_2.py            # Supplementary Figure 2
+├── supp_fig_3.py            # Supplementary Figure 3
 ├── supp_fig_4.py            # Supplementary Figure 4 (requires figure_2.py)
 ├── supp_fig_6.py            # Supplementary Figure 6 
 ├── supp_fig_7.py            # Supplementary Figure 7 (requires figure_4.py)
-├── data/                     # Data directory (create and populate with downloads)
+├── supp_fig_9.py            # Supplementary Figure 9
+├── data/                     # Data directory (populate with downloads)
 ├── processed_data/           # Cached analysis results (auto-created)
 └── figures/                  # Generated figures (auto-created)
 ```
@@ -162,9 +165,12 @@ python figure_4.py
 
 ```bash
 # After running the corresponding main figures, generate supplementary figures:
+python supp_fig_2.py   
+python supp_fig_3.py   
 python supp_fig_4.py   # Requires: figure_2.py outputs
 python supp_fig_6.py   
 python supp_fig_7.py   # Requires: figure_4.py outputs
+python supp_fig_9.py   
 ```
 
 **Workflow recommendation:**
